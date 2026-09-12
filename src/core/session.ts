@@ -1,5 +1,5 @@
 import type { PolarisConfig } from '../config/config.ts';
-import { getProvider, type ModelSession } from '../providers/provider.ts';
+import { getProvider, type ModelEvent, type ModelSession } from '../providers/provider.ts';
 import { PolarisError } from './errors.ts';
 import { debug } from './logger.ts';
 
@@ -60,13 +60,24 @@ export class Session {
     debug('session', 'started with', provider.id);
   }
 
-  /** Sends a user message to the model and records both sides of the turn. */
-  async prompt(input: string, signal?: AbortSignal): Promise<string> {
+  /**
+   * Runs one turn and re-emits the provider's events. The transcript is filled
+   * in as the answer arrives, so a turn cancelled half-way still records what
+   * the user actually saw.
+   */
+  async *send(input: string, signal?: AbortSignal): AsyncIterable<ModelEvent> {
     if (!this.#model) throw new PolarisError('Session is not started');
     this.#history.push({ role: 'user', text: input });
-    const reply = await this.#model.send(input, signal);
-    this.#history.push({ role: 'assistant', text: reply.text });
-    return reply.text;
+
+    let answer = '';
+    try {
+      for await (const event of this.#model.send(input, signal)) {
+        if (event.type === 'text-delta') answer += event.text;
+        yield event;
+      }
+    } finally {
+      if (answer.length > 0) this.#history.push({ role: 'assistant', text: answer });
+    }
   }
 
   clearHistory(): void {

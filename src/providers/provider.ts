@@ -1,6 +1,6 @@
 /**
  * The only contract the CLI core knows about. Concrete providers
- * (openai/, anthropic/, ...) live in subfolders and never leak their SDK
+ * (anthropic/, openai/, ...) live in subfolders and never leak their SDK
  * types past this file.
  */
 export interface ProviderSessionOptions {
@@ -9,14 +9,27 @@ export interface ProviderSessionOptions {
   readonly model?: string;
 }
 
-export interface ModelReply {
-  readonly text: string;
-}
+/**
+ * Provider-agnostic stream of what the model is doing. Deliberately small:
+ * `thinking-delta`, `tool-start`, `tool-result` and `usage` are the obvious
+ * next members, and adding them cannot break existing consumers as long as
+ * they switch on `type` and ignore what they don't know.
+ *
+ * Failures are thrown, not emitted — a stream that stops mid-answer is an
+ * exception, and the REPL already has one error path.
+ */
+export type ModelEvent =
+  | { readonly type: 'message-start' }
+  | { readonly type: 'text-delta'; readonly text: string }
+  | { readonly type: 'message-end' };
 
 export interface ModelSession {
   readonly model: string;
-  /** `signal` lets the REPL cancel an in-flight turn with Ctrl+C. */
-  send(input: string, signal?: AbortSignal): Promise<ModelReply>;
+  /**
+   * One conversational turn. The session keeps the conversation context, so
+   * successive calls are multi-turn. `signal` cancels the turn (Ctrl+C).
+   */
+  send(input: string, signal?: AbortSignal): AsyncIterable<ModelEvent>;
   close(): Promise<void>;
 }
 

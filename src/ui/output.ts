@@ -14,12 +14,7 @@ export const ui = {
     ui.line(`  ${theme.accent('✦ Polaris')}`);
     ui.line();
     ui.line(`  ${theme.dim(shortenPath(cwd))}`);
-    ui.line(`  ${theme.dim(`${provider}/${model}`)}`);
-    ui.line();
-  },
-  assistant(text: string): void {
-    ui.line(theme.accent('Polaris:'));
-    ui.line(text);
+    ui.line(`  ${theme.dim(`${provider} · ${model}`)}`);
     ui.line();
   },
   error(message: string): void {

@@ -4,9 +4,15 @@
   "description": "Interactive coding-agent CLI",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.6.0" },
-  "bin": { "polaris": "./dist/main.js" },
-  "files": ["dist"],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "bin": {
+    "polaris": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "node src/main.ts",
     "build": "tsc",
@@ -20,5 +26,8 @@
     "@biomejs/biome": "^2.3.14",
     "@types/node": "^24.11.1",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0"
   }
 }

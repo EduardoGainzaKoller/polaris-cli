@@ -3,6 +3,7 @@ import { toUserMessage } from '../core/errors.ts';
 import { debug, isDebug } from '../core/logger.ts';
 import type { Session } from '../core/session.ts';
 import { ui } from '../ui/output.ts';
+import { renderStream } from '../ui/stream.ts';
 import { theme } from '../ui/theme.ts';
 import { createRegistry } from './commands/builtin.ts';
 import { CommandRegistry } from './commands/registry.ts';
@@ -96,7 +97,8 @@ export async function runRepl(session: Session): Promise<void> {
     turnAbort = new AbortController();
     try {
       ui.line();
-      ui.assistant(await session.prompt(line, turnAbort.signal));
+      await renderStream(session.send(line, turnAbort.signal));
+      ui.line();
     } catch (error) {
       if (turnAbort.signal.aborted) {
         ui.line();

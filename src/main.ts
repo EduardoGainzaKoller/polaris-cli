@@ -5,6 +5,7 @@ import { loadConfig } from './config/config.ts';
 import { toUserMessage } from './core/errors.ts';
 import { debug, isDebug, setDebug } from './core/logger.ts';
 import { Session } from './core/session.ts';
+import { anthropicProvider } from './providers/anthropic/index.ts';
 import { mockProvider } from './providers/mock/index.ts';
 import { registerProvider } from './providers/provider.ts';
 import { ui } from './ui/output.ts';
@@ -16,7 +17,7 @@ const USAGE = `Polaris ${VERSION}
 Usage: polaris [options]
 
 Options:
-  --provider <id>  Override the configured provider
+  --provider <id>  Provider to use: mock (default) or anthropic
   --model <id>     Override the configured model
   --debug          Print internal logs to stderr
   -v, --version    Print the version
@@ -47,6 +48,7 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   setDebug(values.debug === true || process.env.POLARIS_DEBUG === '1');
 
   registerProvider(mockProvider);
+  registerProvider(anthropicProvider);
 
   const cwd = process.cwd();
   const config = await loadConfig();
