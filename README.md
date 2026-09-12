@@ -63,20 +63,26 @@ interchangeable. Pick one per run:
 | `mock` (default) | `polaris --provider mock` | Offline echo provider. No credentials, no network. |
 | `anthropic-api` | `polaris --provider anthropic-api` | The Anthropic **Messages API** through `@anthropic-ai/sdk`. Polaris replays the conversation on every turn. |
 | `claude` | `polaris --provider claude` | The **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`), the runtime behind Claude Code, used as a library. The runtime owns the session. |
+| `codex` | `polaris --provider codex` | The **Codex App Server**, spoken over JSON-RPC to a `codex app-server` process. Codex owns the thread. |
 
 `mock` is the default on purpose: starting on a real provider would greet anyone
 without credentials with an error on their first message. Change the default with
 `{"provider": "claude"}` in `~/.polaris/config.json`.
 
-The two Claude providers differ in *what runs the conversation*, not in who bills it:
+They differ in *what runs the conversation*:
 
 * `anthropic-api` is a direct HTTP conversation with the Messages API. Polaris keeps
   the message list and resends it each turn.
-* `claude` starts one long-lived Agent SDK session and feeds every prompt into it, so
-  context, turn boundaries and interrupts are handled by the runtime. In v0.2.1 that
-  runtime is deliberately stripped down to a plain chat: **all built-in tools are
-  disabled** (`tools: []`) and **no settings, skills or `CLAUDE.md` files are loaded**
-  (`settingSources: []`). Capabilities come later, on purpose.
+* `claude` starts one long-lived Agent SDK session and feeds every prompt into it.
+* `codex` starts one `codex app-server` process, opens a thread, and turns each prompt
+  into a turn on that thread.
+
+Both agentic runtimes are deliberately stripped down to a plain chat. `claude` runs with
+**all built-in tools disabled** (`tools: []`) and **no settings, skills or `CLAUDE.md`
+loaded** (`settingSources: []`); `codex` runs its thread **read-only**
+(`sandbox: "read-only"`, `approvalPolicy: "never"`), and any approval request that
+reaches Polaris anyway is **declined** — Polaris has no approval UI, and answering "yes"
+automatically would be the wrong default. Capabilities come later, on purpose.
 
 ### Authentication
 
@@ -88,6 +94,7 @@ the environment, as documented by Anthropic:
 | --- | --- |
 | `anthropic-api` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile. |
 | `claude` | `ANTHROPIC_API_KEY`, or the third-party platform variables the Agent SDK documents (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, …). |
+| `codex` | Whatever the Codex CLI is already signed in with — including **Sign in with ChatGPT**. Polaris asks the runtime *whether* a login exists (`getAuthStatus`), never for the token, and **does not require `OPENAI_API_KEY`**. |
 
 ```bash
 # PowerShell
@@ -122,12 +129,26 @@ export POLARIS_CLAUDE_EXECUTABLE="/path/to/claude"
 Polaris does not install anything for you; when the runtime is missing it says so in one
 line.
 
+### The Codex runtime
+
+`--provider codex` drives a `codex app-server` process, so the
+[Codex CLI](https://developers.openai.com/codex/cli) must be installed and signed in:
+
+```bash
+codex        # sign in with ChatGPT the first time
+```
+
+Polaris spawns `codex` from your PATH; set `POLARIS_CODEX_EXECUTABLE` to point somewhere
+else. It installs nothing and signs in to nothing — when Codex is missing or logged out,
+it says so in one line.
+
 ### Model
 
 `anthropic-api` defaults to `claude-opus-5` (one constant, in
 `src/providers/anthropic-api/index.ts`). `claude` sets **no** model, so the runtime's own
 default applies; Polaris reads back whatever the runtime reports and shows it in
-`/status`. Override either with `polaris --model <id>`, or with `{"model": "..."}` in
+`/status`. `codex` behaves the same way: the thread reports the model Codex resolved.
+Override any of them with `polaris --model <id>`, or with `{"model": "..."}` in
 `~/.polaris/config.json`.
 
 ## Commands
@@ -177,6 +198,8 @@ src/
     mock/              offline echo provider (streams, like the real one)
     anthropic-api/     Messages API via @anthropic-ai/sdk
     claude/            Claude Agent SDK runtime
+    codex/             Codex App Server (JSON-RPC over stdio)
+      app-server.ts    the process + protocol seam; tests replace it wholesale
   config/config.ts     ~/.polaris/config.json
   ui/
     output.ts          banner, tables, errors
@@ -192,7 +215,7 @@ REPL → Session → ModelSession → provider backend → ModelEvent → render
 The translation to `ModelEvent` happens inside each provider, so the renderer never sees
 an Anthropic stream event or an Agent SDK message.
 
-Four rules keep this able to grow:
+These rules keep this able to grow:
 
 1. **The core never imports a vendor SDK.** It only knows `ModelProvider`,
    `ModelSession` and `ModelEvent`. Adding `providers/openai/` is a new folder plus one
@@ -204,13 +227,17 @@ Four rules keep this able to grow:
    `usage` can be added later without touching existing consumers. Failures are thrown,
    not emitted.
 3. **Each provider owns its conversation state, in whatever way suits it.**
-   `anthropic-api` replays a message list because the Messages API is stateless; `claude`
-   keeps one live runtime session and pushes prompts into it; a future provider can do
-   something else again. `Session` keeps only a plain transcript for the UI.
+   `anthropic-api` replays a message list because the Messages API is stateless;
+   `claude` keeps one live runtime session; `codex` keeps one thread and adds a turn per
+   prompt. `Session` keeps only a plain transcript for the UI.
    Cancellation follows the same rule: `anthropic-api` keeps the partial answer as
-   context (Polaris owns that history), while `claude` calls the runtime's `interrupt()`
-   and lets the runtime decide what its transcript keeps — Polaris invents no semantics
-   on top of it, and in both cases the session stays open for the next prompt.
+   context (Polaris owns that history), while `claude` calls `interrupt()` and `codex`
+   calls `turn/interrupt`, letting each runtime decide what its own transcript keeps.
+   In all three the session stays open for the next prompt.
+4. **A richer protocol is narrowed at the provider, not in the UI.** Codex streams
+   reasoning, plans, command output, diffs, usage and rate limits; v0.3 renders only
+   `item/agentMessage/delta` and ignores the rest by design. Unknown events are logged
+   under `--debug` and never break a session.
 4. **Commands are data, not control flow**, and **user output is separate from debug
    logging** (`ui/` on stdout, `logger.ts` on stderr).
 
@@ -228,6 +255,6 @@ npm run lint       # biome
 npm run format     # biome --write
 ```
 
-Tests never call Claude and never spend quota. `anthropic-api` is covered end to end
-against a local server speaking the Messages streaming protocol; `claude` is covered
-against a fake runtime injected through `createClaudeProvider()`.
+Tests never reach a real model and never spend quota. `anthropic-api` runs against a
+local server speaking the Messages streaming protocol; `claude` and `codex` run against
+fake runtimes injected through `createClaudeProvider()` and `createCodexProvider()`.
