@@ -53,3 +53,38 @@ test('/exit requests shutdown, /clear does not touch history', () => {
   assert.ok(exited);
   assert.ok(cleared);
 });
+
+test('/status reports the active provider and model', () => {
+  const registry = new CommandRegistry();
+  registry.register(...builtinCommands(registry));
+
+  const context = {
+    session: {
+      cwd: '/work/example',
+      providerId: 'claude',
+      modelId: 'claude-sonnet-5',
+      history: [{ role: 'user', text: 'hola' }],
+      active: true,
+    },
+    requestExit: () => {},
+    clearScreen: () => {},
+  } as never;
+
+  const written: string[] = [];
+  const original = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk: string | Uint8Array): boolean => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    registry.get('status')?.run(context, []);
+  } finally {
+    process.stdout.write = original;
+  }
+
+  const output = written.join('');
+  assert.match(output, /provider\s+claude/);
+  assert.match(output, /model\s+claude-sonnet-5/);
+  assert.match(output, /session\s+active/);
+  assert.match(output, /example/);
+});

@@ -8,7 +8,7 @@ and Ctrl+C cancels a single turn without killing the session.
   ✦ Polaris
 
   ~/projects/example
-  anthropic · claude-opus-5
+  claude · claude-sonnet-5
 
 ❯ Hola, me llamo Eduardo
 
@@ -25,8 +25,8 @@ Goodbye.
 
 ## Requirements
 
-Node.js >= 22.6 (24 recommended). One runtime dependency: the official
-`@anthropic-ai/sdk`.
+Node.js >= 22.6 (24 recommended). Two runtime dependencies, both official Anthropic
+packages: `@anthropic-ai/sdk` and `@anthropic-ai/claude-agent-sdk`.
 
 ## Install (local development)
 
@@ -55,21 +55,39 @@ npm run dev
 
 ## Providers
 
-| Provider | Flag | What it does |
+Polaris talks to a model through one small interface, so backends are
+interchangeable. Pick one per run:
+
+| Provider | Flag | What it is |
 | --- | --- | --- |
 | `mock` (default) | `polaris --provider mock` | Offline echo provider. No credentials, no network. |
-| `anthropic` | `polaris --provider anthropic` | Real conversation with Claude, streamed. |
+| `anthropic-api` | `polaris --provider anthropic-api` | The Anthropic **Messages API** through `@anthropic-ai/sdk`. Polaris replays the conversation on every turn. |
+| `claude` | `polaris --provider claude` | The **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`), the runtime behind Claude Code, used as a library. The runtime owns the session. |
 
-`mock` is the default on purpose: starting on `anthropic` would greet anyone without
-credentials with an error on their first message. Make Claude your default by putting
-`{"provider": "anthropic"}` in `~/.polaris/config.json`.
+`mock` is the default on purpose: starting on a real provider would greet anyone
+without credentials with an error on their first message. Change the default with
+`{"provider": "claude"}` in `~/.polaris/config.json`.
+
+The two Claude providers differ in *what runs the conversation*, not in who bills it:
+
+* `anthropic-api` is a direct HTTP conversation with the Messages API. Polaris keeps
+  the message list and resends it each turn.
+* `claude` starts one long-lived Agent SDK session and feeds every prompt into it, so
+  context, turn boundaries and interrupts are handled by the runtime. In v0.2.1 that
+  runtime is deliberately stripped down to a plain chat: **all built-in tools are
+  disabled** (`tools: []`) and **no settings, skills or `CLAUDE.md` files are loaded**
+  (`settingSources: []`). Capabilities come later, on purpose.
 
 ### Authentication
 
-Polaris does not handle credentials itself — the official SDK resolves them, in this
-order: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, then a profile created by the
-`ant auth login` CLI. Polaris never reads credential files and never reuses tokens
-belonging to another tool.
+Polaris never reads credential files, never copies tokens from another tool and never
+sets credential environment variables of its own. Each SDK resolves credentials from
+the environment, as documented by Anthropic:
+
+| Provider | Documented authentication |
+| --- | --- |
+| `anthropic-api` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile. |
+| `claude` | `ANTHROPIC_API_KEY`, or the third-party platform variables the Agent SDK documents (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, …). |
 
 ```bash
 # PowerShell
@@ -82,11 +100,35 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 Get a key at <https://console.anthropic.com/>. Keys, tokens and headers are never
 printed, not even under `--debug`.
 
+> **A note on Claude subscriptions.** The Agent SDK documentation states that, unless
+> previously approved by Anthropic, third-party developers may not offer claude.ai login
+> or its rate limits in their products, including products built on the Agent SDK, and
+> directs them to API key authentication instead. Polaris therefore documents and
+> targets API key authentication only. See
+> <https://code.claude.com/docs/en/agent-sdk/overview>.
+
+### The Claude Code runtime
+
+The Agent SDK npm package bundles a native Claude Code binary, so a separate install is
+normally unnecessary. Some installs get no bundled binary — for example
+`npm ci --omit=optional`, which skips the optional dependency that carries it. Reinstall
+without skipping optional dependencies, or [install Claude Code](https://code.claude.com/docs/en/setup)
+and point Polaris at it:
+
+```bash
+export POLARIS_CLAUDE_EXECUTABLE="/path/to/claude"
+```
+
+Polaris does not install anything for you; when the runtime is missing it says so in one
+line.
+
 ### Model
 
-Defaults to `claude-opus-5` (one constant, in `src/providers/anthropic/index.ts`).
-Override per run with `polaris --model claude-sonnet-5`, or permanently with
-`{"model": "..."}` in `~/.polaris/config.json`. `/status` shows what is in use.
+`anthropic-api` defaults to `claude-opus-5` (one constant, in
+`src/providers/anthropic-api/index.ts`). `claude` sets **no** model, so the runtime's own
+default applies; Polaris reads back whatever the runtime reports and shows it in
+`/status`. Override either with `polaris --model <id>`, or with `{"model": "..."}` in
+`~/.polaris/config.json`.
 
 ## Commands
 
@@ -112,7 +154,7 @@ Optional, and only read at startup:
 
 ```jsonc
 // ~/.polaris/config.json
-{ "provider": "anthropic", "model": "claude-opus-5" }
+{ "provider": "claude" }
 ```
 
 A missing or malformed file is not an error; Polaris falls back to defaults (and explains
@@ -133,7 +175,8 @@ src/
   providers/
     provider.ts        ModelProvider / ModelSession / ModelEvent + registry
     mock/              offline echo provider (streams, like the real one)
-    anthropic/         Claude via @anthropic-ai/sdk — the only file that imports it
+    anthropic-api/     Messages API via @anthropic-ai/sdk
+    claude/            Claude Agent SDK runtime
   config/config.ts     ~/.polaris/config.json
   ui/
     output.ts          banner, tables, errors
@@ -143,8 +186,11 @@ src/
 The data flow for one turn:
 
 ```text
-REPL → Session → ModelSession → Claude (SSE) → ModelEvent → renderer → terminal
+REPL → Session → ModelSession → provider backend → ModelEvent → renderer → terminal
 ```
+
+The translation to `ModelEvent` happens inside each provider, so the renderer never sees
+an Anthropic stream event or an Agent SDK message.
 
 Four rules keep this able to grow:
 
@@ -157,8 +203,14 @@ Four rules keep this able to grow:
    (`message-start` / `text-delta` / `message-end`); `thinking-delta`, `tool-start` and
    `usage` can be added later without touching existing consumers. Failures are thrown,
    not emitted.
-3. **Conversation state lives in the provider.** The Messages API is stateless, so the
-   Anthropic session replays its own history; `Session` keeps only a plain transcript.
+3. **Each provider owns its conversation state, in whatever way suits it.**
+   `anthropic-api` replays a message list because the Messages API is stateless; `claude`
+   keeps one live runtime session and pushes prompts into it; a future provider can do
+   something else again. `Session` keeps only a plain transcript for the UI.
+   Cancellation follows the same rule: `anthropic-api` keeps the partial answer as
+   context (Polaris owns that history), while `claude` calls the runtime's `interrupt()`
+   and lets the runtime decide what its transcript keeps — Polaris invents no semantics
+   on top of it, and in both cases the session stays open for the next prompt.
 4. **Commands are data, not control flow**, and **user output is separate from debug
    logging** (`ui/` on stdout, `logger.ts` on stderr).
 
@@ -176,5 +228,6 @@ npm run lint       # biome
 npm run format     # biome --write
 ```
 
-Tests never call Claude. The Anthropic provider is covered end to end against a local
-server that speaks the Messages streaming protocol.
+Tests never call Claude and never spend quota. `anthropic-api` is covered end to end
+against a local server speaking the Messages streaming protocol; `claude` is covered
+against a fake runtime injected through `createClaudeProvider()`.

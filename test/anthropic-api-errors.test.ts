@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Anthropic from '@anthropic-ai/sdk';
 import { PolarisError } from '../src/core/errors.ts';
-import { describeError, toPolarisError } from '../src/providers/anthropic/errors.ts';
+import { describeError, toPolarisError } from '../src/providers/anthropic-api/errors.ts';
 
 /** Builds a real SDK error object without touching the network. */
 function apiError(status: number, type: string): Anthropic.APIError {

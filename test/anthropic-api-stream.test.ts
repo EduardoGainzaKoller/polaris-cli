@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { after, before, test } from 'node:test';
-import { anthropicProvider, DEFAULT_MODEL } from '../src/providers/anthropic/index.ts';
+import { anthropicApiProvider, DEFAULT_MODEL } from '../src/providers/anthropic-api/index.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
 
 /**
@@ -95,7 +95,7 @@ async function collect(events: AsyncIterable<ModelEvent>): Promise<ModelEvent[]>
 test('text deltas from the wire become Polaris text-delta events', async () => {
   requests = [];
   reply = ['Hola', ' Eduardo'];
-  const session = await anthropicProvider.createSession({ cwd: '/tmp' });
+  const session = await anthropicApiProvider.createSession({ cwd: '/tmp' });
 
   const events = await collect(session.send('Me llamo Eduardo'));
   assert.equal(events.at(0)?.type, 'message-start');
@@ -110,7 +110,7 @@ test('text deltas from the wire become Polaris text-delta events', async () => {
 
 test('the conversation is replayed, so the session is multi-turn', async () => {
   requests = [];
-  const session = await anthropicProvider.createSession({ cwd: '/tmp', model: 'claude-test' });
+  const session = await anthropicApiProvider.createSession({ cwd: '/tmp', model: 'claude-test' });
 
   await collect(session.send('Me llamo Eduardo'));
   await collect(session.send('Como me llamo?'));
@@ -130,7 +130,7 @@ test('cancelling mid-answer keeps the partial turn and leaves the session usable
   requests = [];
   reply = ['Spring ', 'Boot ', 'es ', 'un ', 'framework'];
   delayMs = 20;
-  const session = await anthropicProvider.createSession({ cwd: '/tmp' });
+  const session = await anthropicApiProvider.createSession({ cwd: '/tmp' });
   const controller = new AbortController();
 
   let seen = '';

@@ -28,8 +28,8 @@ const SYSTEM_PROMPT = [
   'if something would require reading files or running commands, say so.',
 ].join(' ');
 
-export const anthropicProvider: ModelProvider = {
-  id: 'anthropic',
+export const anthropicApiProvider: ModelProvider = {
+  id: 'anthropic-api',
   async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
     // Credentials are resolved by the SDK itself (ANTHROPIC_API_KEY,
     // ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile). Polaris never
