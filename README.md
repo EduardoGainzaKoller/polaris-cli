@@ -1,15 +1,23 @@
 # Polaris
 
 A terminal application for working with coding agents. You run `polaris` once and keep a
-conversation going: answers stream in, the provider and model are always on screen, and
-Ctrl+C cancels a single turn without killing the session.
+conversation going: the agent explores your repository on its own, answers stream in, the
+provider and model are always on screen, and Ctrl+C cancels a single turn without killing
+the session.
 
 ```text
  ✦ POLARIS  my-project                                          codex · gpt-5.6-luna
  ──────────────────────────────────────────────────────────────────────────────────
 
  You
- Explícame la arquitectura de este proyecto
+ Analiza la arquitectura de este proyecto
+
+ ● Glob src/**/*.ts
+   31 files
+ ● Read package.json
+   42 lines
+ ● Grep "ModelProvider"
+   8 matches in 5 files
 
  Polaris
  El proyecto separa el núcleo de la interfaz…
@@ -17,7 +25,7 @@ Ctrl+C cancels a single turn without killing the session.
 ╭──────────────────────────────────────────────────────────────────────────────────╮
 │ > Ask Polaris…                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────╯
- codex · gpt-5.6-luna    ~/projects/my-project                              ready
+ codex · gpt-5.6-luna    ~/projects/my-project                  read-only · ready
 ```
 
 Polaris renders full-screen when it owns a terminal, and falls back to a plain
@@ -25,9 +33,9 @@ line-by-line renderer when its output is piped — both drive the same core.
 
 ## Requirements
 
-Node.js >= 22.6 (24 recommended). Runtime dependencies: the official
-`@anthropic-ai/sdk` and `@anthropic-ai/claude-agent-sdk`, plus `ink` and `react` for the
-terminal UI. The Codex provider needs no package — it drives the Codex CLI you already
+Node.js >= 24. Runtime dependencies: the official `@anthropic-ai/sdk` and
+`@anthropic-ai/claude-agent-sdk`, `ink` and `react` for the terminal UI, and `ignore` to
+honour `.gitignore`. The Codex provider needs no package — it drives the Codex CLI you already
 have.
 
 ## Install (local development)
@@ -50,6 +58,38 @@ polaris
 ```
 
 During development, `npm run dev` compiles and runs in one step.
+
+## Repository tools
+
+Polaris can look at the project it was started in — and, in this version, **only look**.
+
+| Tool | What it does |
+| --- | --- |
+| **Read** | Reads a text file, whole or as a line range |
+| **Glob** | Lists files matching a pattern such as `src/**/*.ts` |
+| **Grep** | Searches file contents (literal text, or a regular expression) |
+
+The agent decides on its own when to use them, so a question like *"analyse the
+architecture of this project"* is answered after it has actually read the code. Each call
+appears in the transcript as one line with a short outcome (`● Read package.json · 42
+lines`); the file contents go to the model, not to your screen.
+
+**Current capability mode: read-only.** Polaris v0.5 cannot create, modify, move or delete
+files, and cannot run commands that change anything. Ask it to edit something and it will
+tell you it can't. There is no option to turn writing on; that arrives, with an explicit
+permission system, in a later version.
+
+The boundary holds for every provider:
+
+- Paths are confined to the directory Polaris was started in. `..` escapes, absolute paths
+  elsewhere, and symlinks or Windows junctions that point outside are all refused — the
+  check runs on the real, resolved path.
+- `.git` and `node_modules` are never searched, and the root `.gitignore` is honoured
+  (nested `.gitignore` files are not, yet).
+- Binary files are skipped, big files must be read by line range, and long listings or
+  searches are truncated — the agent is told when that happens.
+
+`/tools` shows what the current provider can do; `/status` includes the mode.
 
 ## Providers
 
@@ -75,12 +115,17 @@ They differ in *what runs the conversation*:
 * `codex` starts one `codex app-server` process, opens a thread, and turns each prompt
   into a turn on that thread.
 
-Both agentic runtimes are deliberately stripped down to a plain chat. `claude` runs with
-**all built-in tools disabled** (`tools: []`) and **no settings, skills or `CLAUDE.md`
-loaded** (`settingSources: []`); `codex` runs its thread **read-only**
-(`sandbox: "read-only"`, `approvalPolicy: "never"`), and any approval request that
-reaches Polaris anyway is **declined** — Polaris has no approval UI, and answering "yes"
-automatically would be the wrong default. Capabilities come later, on purpose.
+How each one gets repository access differs, because each runtime has its own official
+mechanism — what you see, and the read-only guarantee, are the same:
+
+- `anthropic-api` and `mock` use **Polaris's own tools**; Polaris runs the tool loop.
+- `claude` uses the runtime's **built-in Read, Glob and Grep and nothing else**. Every other
+  built-in and all MCP tools are removed, the runtime never prompts (it denies instead), a
+  hook enforces the workspace boundary on every call, and no settings, skills, plugins or
+  `CLAUDE.md` are loaded from disk.
+- `codex` explores with its own commands inside a **read-only sandbox without network**,
+  with web search turned off. Approval requests are **declined**, never granted — Polaris
+  has no approval UI, and saying "yes" automatically would be the wrong default.
 
 ### Authentication
 
@@ -154,7 +199,8 @@ Override any of them with `polaris --model <id>`, or with `{"model": "..."}` in
 | Command | Description |
 | --- | --- |
 | `/help` | Show available commands |
-| `/status` | Show cwd, provider, model and turn count |
+| `/status` | Show cwd, provider, model, tool mode and turn count |
+| `/tools` | Show the repository tools available and the capability mode |
 | `/provider [id]` | Switch provider — with no id, pick one from a list |
 | `/model [id]` | Switch model — with no id, pick from what the provider reports |
 | `/config [save]` | Show the configuration, or save the current provider and model |
@@ -219,6 +265,7 @@ src/
     claude/            Claude Agent SDK runtime
     codex/             Codex App Server (JSON-RPC over stdio)
       app-server.ts    the process + protocol seam; tests replace it wholesale
+  tools/               Read / Glob / Grep, the workspace boundary and every limit
   config/config.ts     ~/.polaris/config.json
   ui/
     tui/               Ink components: App, Composer, Selector
@@ -249,10 +296,11 @@ These rules keep this able to grow:
    `registerProvider()` call.
 2. **Streaming is the contract, not a special case.** `send()` returns an
    `AsyncIterable<ModelEvent>` for every provider — the mock streams too, so the UI has
-   exactly one code path. `ModelEvent` is a discriminated union
-   (`message-start` / `text-delta` / `message-end`); `thinking-delta`, `tool-start` and
-   `usage` can be added later without touching existing consumers. Failures are thrown,
-   not emitted.
+   exactly one code path. `ModelEvent` is a discriminated union: `message-start`,
+   `text-delta`, `message-end`, and `tool-start` / `tool-result` / `tool-error`, which
+   describe tool activity *whoever ran it* — with a human name, a target and a one-line
+   outcome, never the content the model read. Turn failures are thrown; a failed tool is
+   an event the model recovers from.
 3. **Each provider owns its conversation state, in whatever way suits it.**
    `anthropic-api` replays a message list because the Messages API is stateless;
    `claude` keeps one live runtime session; `codex` keeps one thread and adds a turn per
@@ -265,15 +313,18 @@ These rules keep this able to grow:
    messages the user sees; the conversation itself belongs to the provider. `/clear`
    therefore clears pixels, and switching provider starts a genuinely new context — which
    Polaris says out loud instead of pretending otherwise.
-5. **A richer protocol is narrowed at the provider, not in the UI.** Codex streams
-   reasoning, plans, command output, diffs, usage and rate limits; v0.3 renders only
-   `item/agentMessage/delta` and ignores the rest by design. Unknown events are logged
-   under `--debug` and never break a session.
-4. **Commands are data, not control flow**, and **user output is separate from debug
+5. **Tools share semantics, not machinery.** Polaris executes its own tools for
+   `anthropic-api`; the Claude runtime runs its built-ins; Codex runs commands in its
+   sandbox. Each provider translates what happened into the same tool events, and the
+   workspace boundary is one function reused wherever Polaris itself decides.
+6. **A richer protocol is narrowed at the provider, not in the UI.** Codex and Claude
+   stream reasoning, plans, diffs, usage and more; Polaris renders text and tool activity
+   and ignores the rest by design. Unknown events never break a session.
+7. **Commands are data, not control flow**, and **user output is separate from debug
    logging** (`ui/` on stdout, `logger.ts` on stderr).
 
-Agent tooling (filesystem, shell, git), permissions, Markdown rendering and persistent
-history are deliberately *not* here yet.
+Writing files, running commands, git operations, a permission system, Markdown rendering
+and persistent history are deliberately *not* here yet.
 
 ## Scripts
 

@@ -77,7 +77,7 @@ test('the registry resolves names and aliases and lists every command', () => {
   assert.equal(commands.get('nope'), undefined);
   assert.deepEqual(
     commands.list().map((command) => command.name),
-    ['clear', 'config', 'exit', 'help', 'model', 'provider', 'status'],
+    ['clear', 'config', 'exit', 'help', 'model', 'provider', 'status', 'tools'],
   );
 });
 

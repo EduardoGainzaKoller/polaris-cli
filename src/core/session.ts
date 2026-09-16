@@ -1,5 +1,10 @@
 import type { PolarisConfig } from '../config/config.ts';
-import { getProvider, type ModelEvent, type ModelSession } from '../providers/provider.ts';
+import {
+  getProvider,
+  type ModelEvent,
+  type ModelSession,
+  type ToolAccess,
+} from '../providers/provider.ts';
 import { PolarisError } from './errors.ts';
 import { debug } from './logger.ts';
 
@@ -26,6 +31,7 @@ export class Session {
 
   #history: Turn[] = [];
   #model: ModelSession | null = null;
+  #access: ToolAccess | null = null;
 
   constructor(options: SessionOptions) {
     this.cwd = options.cwd;
@@ -44,6 +50,11 @@ export class Session {
     return this.#model?.model ?? this.config.model ?? 'none';
   }
 
+  /** What the provider may do to the workspace; null before the session starts. */
+  get access(): ToolAccess | null {
+    return this.#access;
+  }
+
   get active(): boolean {
     return this.#model !== null;
   }
@@ -57,6 +68,7 @@ export class Session {
       ? { cwd: this.cwd, model: this.config.model }
       : { cwd: this.cwd };
     this.#model = await provider.createSession(options);
+    this.#access = provider.access;
     debug('session', 'started with', provider.id);
   }
 

@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import type { PolarisConfig } from '../config/config.ts';
+import type { ModelEvent, ToolAccess } from '../providers/provider.ts';
 import { PolarisError, toUserMessage } from './errors.ts';
 import { debug } from './logger.ts';
 import { Session } from './session.ts';
@@ -9,16 +10,35 @@ import { Session } from './session.ts';
  * line-based one for pipes, a future `polaris run` — reads this and nothing
  * else, so no provider detail can leak into a component.
  */
-export type AppStatus = 'ready' | 'thinking' | 'streaming' | 'switching' | 'cancelled' | 'error';
+export type AppStatus =
+  | 'ready'
+  | 'thinking'
+  | 'streaming'
+  | 'reading'
+  | 'searching'
+  | 'working'
+  | 'switching'
+  | 'cancelled'
+  | 'error';
 
-export type MessageRole = 'user' | 'assistant' | 'system';
+export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
+/** For a tool, `streaming` means still running. */
 export type MessageState = 'streaming' | 'complete' | 'cancelled' | 'error';
+
+export interface ToolCall {
+  /** Human name: Read, Glob, Grep… */
+  readonly name: string;
+  readonly target: string;
+  /** Outcome once finished: a summary, or the error. */
+  readonly detail?: string;
+}
 
 export interface UiMessage {
   readonly id: string;
   readonly role: MessageRole;
   readonly text: string;
   readonly state: MessageState;
+  readonly tool?: ToolCall;
 }
 
 export interface AppState {
@@ -30,6 +50,8 @@ export interface AppState {
   readonly busy: boolean;
   readonly messages: readonly UiMessage[];
   readonly turns: number;
+  /** What the provider may do to the workspace; read-only in v0.5. */
+  readonly access: ToolAccess | null;
 }
 
 /**
@@ -65,6 +87,7 @@ export class PolarisApp {
       busy: this.#turn !== null || this.#status === 'switching',
       messages: this.#messages,
       turns: this.#session.history.length,
+      access: this.#session.access,
     };
   }
 
@@ -82,30 +105,66 @@ export class PolarisApp {
     this.#emit();
   }
 
-  /** Runs one turn, streaming the answer into the transcript as it arrives. */
+  /**
+   * Runs one turn. Answer text streams into an assistant message; each tool
+   * call becomes its own transcript entry that goes from running to finished.
+   * Text that arrives after a tool starts a new assistant message, so the
+   * transcript reads in the order things actually happened.
+   */
   async submit(text: string): Promise<void> {
     if (this.#turn) return;
     this.#append('user', text, 'complete');
-    const assistant = this.#append('assistant', '', 'streaming');
 
     const controller = new AbortController();
     this.#turn = controller;
     this.#set('thinking');
 
+    let answer: string | null = null;
+    /** Provider tool id → transcript entry, for tools still running. */
+    const running = new Map<string, { entry: string; name: string }>();
+
+    const seal = (state: MessageState) => {
+      if (answer) this.#update(answer, (message) => ({ ...message, state }));
+      answer = null;
+    };
+
     try {
       for await (const event of this.#session.send(text, controller.signal)) {
-        if (event.type !== 'text-delta') continue;
-        if (this.#status !== 'streaming') this.#status = 'streaming';
-        this.#update(assistant.id, (message) => ({ ...message, text: message.text + event.text }));
+        switch (event.type) {
+          case 'text-delta': {
+            answer ??= this.#append('assistant', '', 'streaming').id;
+            this.#status = 'streaming';
+            const id = answer;
+            this.#update(id, (message) => ({ ...message, text: message.text + event.text }));
+            break;
+          }
+          case 'tool-start': {
+            seal('complete');
+            const entry = this.#appendTool(event);
+            running.set(event.id, { entry, name: event.name });
+            this.#set(activity(running));
+            break;
+          }
+          case 'tool-result':
+          case 'tool-error':
+            this.#finishTool(running, event);
+            this.#set(running.size > 0 ? activity(running) : 'thinking');
+            break;
+        }
       }
-      this.#update(assistant.id, (message) => ({ ...message, state: 'complete' }));
+      seal('complete');
       this.#set('ready');
     } catch (error) {
+      // Whatever was still running never finished.
+      for (const { entry } of running.values()) {
+        this.#update(entry, (message) => ({ ...message, state: 'cancelled' }));
+      }
       if (controller.signal.aborted) {
-        this.#update(assistant.id, (message) => ({ ...message, state: 'cancelled' }));
+        if (answer) seal('cancelled');
+        else this.notice('Cancelled.');
         this.#set('cancelled');
       } else {
-        this.#update(assistant.id, (message) => ({ ...message, state: 'error' }));
+        seal('error');
         this.notice(toUserMessage(error), 'error');
         this.#set('error');
       }
@@ -113,6 +172,37 @@ export class PolarisApp {
       this.#turn = null;
       this.#emit();
     }
+  }
+
+  #appendTool(event: Extract<ModelEvent, { type: 'tool-start' }>): string {
+    const message: UiMessage = {
+      id: `m${this.#nextId++}`,
+      role: 'tool',
+      text: '',
+      state: 'streaming',
+      tool: { name: event.name, target: event.target },
+    };
+    this.#messages = [...this.#messages, message];
+    this.#emit();
+    return message.id;
+  }
+
+  #finishTool(
+    running: Map<string, { entry: string; name: string }>,
+    event: Extract<ModelEvent, { type: 'tool-result' | 'tool-error' }>,
+  ): void {
+    const call = running.get(event.id);
+    if (!call) return;
+    running.delete(event.id);
+    const failed = event.type === 'tool-error';
+    this.#update(call.entry, (message) => ({
+      ...message,
+      state: failed ? 'error' : 'complete',
+      tool: {
+        ...(message.tool as ToolCall),
+        detail: failed ? event.error : event.summary,
+      },
+    }));
   }
 
   /** Ctrl+C: cancels the running turn only. Returns false when nothing was running. */
@@ -200,4 +290,13 @@ export class PolarisApp {
     const state = this.state;
     for (const listener of this.#listeners) listener(state);
   }
+}
+
+/** A single word for the status bar, however many tools are running. */
+function activity(running: ReadonlyMap<string, { name: string }>): AppStatus {
+  if (running.size !== 1) return running.size === 0 ? 'thinking' : 'working';
+  const [only] = running.values();
+  if (only?.name === 'Read') return 'reading';
+  if (only && ['Grep', 'Glob', 'List'].includes(only.name)) return 'searching';
+  return 'working';
 }

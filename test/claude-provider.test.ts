@@ -40,6 +40,8 @@ interface FakeOptions {
   delayMs?: number;
   /** Thrown when the session is started, like a missing runtime would. */
   startError?: Error;
+  /** Runtime messages emitted before the text of each turn (tool calls and results). */
+  frames?: SDKMessage[][];
 }
 
 function fakeClaude(options: FakeOptions = {}) {
@@ -51,6 +53,7 @@ function fakeClaude(options: FakeOptions = {}) {
     options: undefined as Options | undefined,
   };
   const replies = [...(options.replies ?? [['ok']])];
+  const frames = [...(options.frames ?? [])];
 
   const run = ({
     prompt,
@@ -77,6 +80,7 @@ function fakeClaude(options: FakeOptions = {}) {
         for await (const message of prompt) {
           seen.prompts.push(String(message.message.content));
           interrupted = false;
+          for (const frame of frames.shift() ?? []) yield frame;
           for (const chunk of replies.shift() ?? ['ok']) {
             if (interrupted) break;
             if (options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
@@ -142,13 +146,19 @@ test('a configured model is passed through to the runtime', async () => {
   await session.close();
 });
 
-test('no tools and no filesystem settings are enabled', async () => {
+test('only read-only tools exist, locked by deny rules, dontAsk and a hook', async () => {
   const { run, seen } = fakeClaude();
   const session = await createClaudeProvider(run).createSession({ cwd: '/work' });
   await collect(session.send('hola'));
 
-  assert.deepEqual(seen.options?.tools, []);
-  assert.deepEqual(seen.options?.settingSources, []);
+  assert.deepEqual(seen.options?.tools, ['Read', 'Glob', 'Grep']);
+  for (const denied of ['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch', 'WebSearch']) {
+    assert.ok(seen.options?.disallowedTools?.includes(denied), `${denied} is denied`);
+  }
+  assert.ok(seen.options?.disallowedTools?.includes('mcp__*'), 'no MCP tools');
+  assert.equal(seen.options?.permissionMode, 'dontAsk');
+  assert.equal(seen.options?.hooks?.PreToolUse?.length, 1);
+  assert.deepEqual(seen.options?.settingSources, [], 'no CLAUDE.md, settings, skills or plugins');
   assert.equal(seen.options?.cwd, '/work');
   assert.equal(seen.options?.includePartialMessages, true);
   await session.close();

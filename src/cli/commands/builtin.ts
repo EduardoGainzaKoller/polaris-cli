@@ -30,8 +30,29 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
             `  cwd       ${shortenPath(state.cwd)}`,
             `  provider  ${state.provider}`,
             `  model     ${state.model}`,
+            `  tools     ${state.access?.mode ?? 'none'}`,
             `  turns     ${state.turns}`,
             `  session   ${state.status === 'error' ? 'error' : 'active'}`,
+          ].join('\n'),
+        );
+      },
+    },
+    {
+      name: 'tools',
+      summary: 'Show what Polaris can do in this workspace',
+      run({ app }) {
+        const access = app.state.access;
+        if (!access) {
+          app.notice('No provider session is active.');
+          return;
+        }
+        const width = Math.max(...access.tools.map((tool) => tool.length));
+        app.notice(
+          [
+            `  Tools (${access.runtime})`,
+            ...access.tools.map((tool) => `  ${tool.padEnd(width)}  enabled`),
+            '',
+            `  Mode: ${access.mode} — Polaris cannot modify the workspace.`,
           ].join('\n'),
         );
       },

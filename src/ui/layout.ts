@@ -4,7 +4,7 @@ import { shortenPath } from './output.ts';
 /** Pure layout maths — no ANSI, no Ink — so it can be unit-tested directly. */
 
 export interface TranscriptLine {
-  readonly kind: 'label' | 'text' | 'blank';
+  readonly kind: 'label' | 'text' | 'blank' | 'tool' | 'detail';
   readonly role: UiMessage['role'];
   readonly text: string;
   readonly state: UiMessage['state'];
@@ -14,6 +14,19 @@ const LABELS: Record<UiMessage['role'], string> = {
   user: 'You',
   assistant: 'Polaris',
   system: '',
+  tool: '',
+};
+
+/**
+ * One glyph per tool state. All four are in the basic Unicode geometric and
+ * math blocks, which Windows Terminal, conhost with a TrueType font, and every
+ * common macOS/Linux terminal font render.
+ */
+const TOOL_MARKERS: Record<UiMessage['state'], string> = {
+  streaming: '◌',
+  complete: '●',
+  error: '×',
+  cancelled: '◌',
 };
 
 /** Wraps on word boundaries, keeps explicit newlines, never loses characters. */
@@ -46,13 +59,37 @@ export function wrapText(text: string, width: number): string[] {
   return lines;
 }
 
-/** Flattens the transcript into renderable lines: a role label, then the body. */
+/**
+ * Flattens the transcript into renderable lines: a role label then the body for
+ * messages, and a compact one- or two-line entry for each tool call. Consecutive
+ * tool calls stay together without blank lines between them.
+ */
 export function transcriptLines(messages: readonly UiMessage[], width: number): TranscriptLine[] {
   const lines: TranscriptLine[] = [];
+  let previous: UiMessage | undefined;
+
   for (const message of messages) {
-    if (lines.length > 0) {
+    const bothTools = previous?.role === 'tool' && message.role === 'tool';
+    if (lines.length > 0 && !bothTools) {
       lines.push({ kind: 'blank', role: message.role, text: '', state: message.state });
     }
+    previous = message;
+
+    if (message.role === 'tool' && message.tool) {
+      const { name, target, detail } = message.tool;
+      const head = `${TOOL_MARKERS[message.state]} ${name}${target ? ` ${target}` : ''}`;
+      for (const text of wrapText(head, width)) {
+        lines.push({ kind: 'tool', role: 'tool', text, state: message.state });
+      }
+      const outcome = message.state === 'cancelled' ? 'cancelled' : detail;
+      if (outcome) {
+        for (const text of wrapText(outcome, Math.max(1, width - 2))) {
+          lines.push({ kind: 'detail', role: 'tool', text: `  ${text}`, state: message.state });
+        }
+      }
+      continue;
+    }
+
     const label = LABELS[message.role];
     if (label) {
       lines.push({ kind: 'label', role: message.role, text: label, state: message.state });
@@ -91,6 +128,9 @@ const STATUS_LABELS: Record<AppStatus, string> = {
   ready: 'ready',
   thinking: 'thinking',
   streaming: 'streaming',
+  reading: 'reading',
+  searching: 'searching',
+  working: 'working',
   switching: 'switching',
   cancelled: 'cancelled',
   error: 'error',
@@ -108,7 +148,8 @@ export function statusSegments(state: AppState, width: number): { left: string; 
   const where = shortenPath(state.cwd);
   const model = state.model;
   const full = `${state.provider} · ${model}`;
-  const status = statusLabel(state.status);
+  const mode = state.access ? `${state.access.mode} · ` : '';
+  const status = `${mode}${statusLabel(state.status)}`;
 
   if (width >= full.length + where.length + status.length + 8) {
     return { left: `${full}    ${where}`, right: status };

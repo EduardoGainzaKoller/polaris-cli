@@ -120,6 +120,16 @@ function createPrinter() {
           written.set(message.id, message.text.length);
           continue;
         }
+        if (message.role === 'tool') {
+          // A line renderer cannot redraw, so each tool is printed once, finished.
+          if (message.state === 'streaming' || closed.has(message.id) || !message.tool) continue;
+          closed.add(message.id);
+          const { name, target, detail } = message.tool;
+          const marker = message.state === 'error' ? theme.error('×') : theme.dim('●');
+          const outcome = message.state === 'cancelled' ? 'cancelled' : detail;
+          ui.line(`${marker} ${name} ${target}${outcome ? theme.dim(` · ${outcome}`) : ''}`);
+          continue;
+        }
         const already = written.get(message.id) ?? 0;
         if (message.text.length > already) {
           process.stdout.write(prefix(message, already) + message.text.slice(already));

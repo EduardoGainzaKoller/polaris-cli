@@ -15,6 +15,8 @@ interface FakeOptions {
   /** Emitted as the turn status instead of `completed`. */
   turnStatus?: string;
   chunkDelayMs?: number;
+  /** Thread items (started, then completed) emitted before each turn's text. */
+  items?: Array<Array<{ started: JsonObject; completed: JsonObject }>>;
 }
 
 /**
@@ -76,6 +78,10 @@ function fakeCodex(options: FakeOptions = {}) {
   async function stream(turnId: string, chunks: string[]): Promise<void> {
     // A notification Polaris does not render yet must never break the turn.
     notify?.('item/reasoning/textDelta', { turnId, delta: 'thinking about it' });
+    for (const item of options.items?.shift() ?? []) {
+      notify?.('item/started', { threadId: THREAD, turnId, item: item.started });
+      notify?.('item/completed', { threadId: THREAD, turnId, item: item.completed });
+    }
     for (const delta of chunks) {
       if (interrupted) break;
       if (options.chunkDelayMs) await new Promise((r) => setTimeout(r, options.chunkDelayMs));
@@ -134,6 +140,7 @@ test('the session performs the documented handshake before anything else', async
   assert.equal(thread?.params.cwd, '/work/example');
   assert.equal(thread?.params.sandbox, 'read-only');
   assert.equal(thread?.params.approvalPolicy, 'never');
+  assert.deepEqual(thread?.params.config, { web_search: 'disabled' }, 'no web access');
   assert.equal(session.model, MODEL, 'the model comes from the runtime, not from Polaris');
   await session.close();
 });
@@ -281,6 +288,49 @@ test('notifications for unknown turns and unknown methods are harmless', async (
   codex.emit('turn/completed', { turn: { id: 'turn-does-not-exist', status: 'completed' } });
 
   assert.equal(textOf(await collect(session.send('hola'))), 'ok', 'the session still works');
+  await session.close();
+});
+
+test('sandboxed commands in a turn surface as tool events before the answer', async () => {
+  const codex = fakeCodex({
+    replies: [['Está en provider.ts']],
+    items: [
+      [
+        {
+          started: {
+            type: 'commandExecution',
+            id: 'call_1',
+            command: 'rg ModelProvider',
+            status: 'inProgress',
+            commandActions: [{ type: 'search', command: 'rg', query: 'ModelProvider', path: null }],
+          },
+          completed: {
+            type: 'commandExecution',
+            id: 'call_1',
+            command: 'rg ModelProvider',
+            status: 'completed',
+            exitCode: 0,
+            aggregatedOutput: 'src/providers/provider.ts:40: export interface ModelProvider',
+            commandActions: [{ type: 'search', command: 'rg', query: 'ModelProvider', path: null }],
+          },
+        },
+      ],
+    ],
+  });
+  const session = await createCodexProvider(codex.connect).createSession({ cwd: '/tmp' });
+
+  const events = await collect(session.send('¿Dónde se define ModelProvider?'));
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['message-start', 'tool-start', 'tool-result', 'text-delta', 'message-end'],
+  );
+  assert.deepEqual(events[1], {
+    type: 'tool-start',
+    id: 'call_1',
+    name: 'Grep',
+    target: '"ModelProvider"',
+  });
+  assert.deepEqual(events[2], { type: 'tool-result', id: 'call_1', summary: '1 match' });
   await session.close();
 });
 

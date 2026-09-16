@@ -13,6 +13,13 @@ import type {
   ProviderSessionOptions,
 } from '../provider.ts';
 import { toPolarisError, turnFailure } from './errors.ts';
+import {
+  CLAUDE_TOOL_ACCESS,
+  ClaudeToolTranslator,
+  DENIED_TOOLS,
+  READ_ONLY_TOOLS,
+  workspaceGuard,
+} from './tools.ts';
 
 /**
  * The slice of the SDK's `Query` that Polaris actually uses. Narrowing it here
@@ -34,18 +41,25 @@ export type QueryFn = (args: {
 const SYSTEM_PROMPT = [
   'You are Polaris, a coding assistant running inside an interactive terminal CLI.',
   'Answer in plain text: the terminal does not render Markdown yet.',
-  'Be concise and concrete. You have no tools in this session;',
-  'if something would require reading files or running commands, say so.',
+  'You can inspect the workspace with Read, Glob and Grep; look at the code before',
+  'answering questions about it. Your access is read-only: you cannot create, edit,',
+  'move or delete files, or run commands. If asked to change something, say so and',
+  'describe the change instead.',
 ].join(' ');
 
 /**
- * v0.2.1 integrates the runtime, not its capabilities: every built-in tool is
- * off and no settings, skills or CLAUDE.md files are loaded from disk, so this
- * provider is a plain conversation like the other two.
+ * v0.5 gives the runtime exactly three read-only tools, four locks deep:
+ * `tools` defines the only built-ins that exist, `disallowedTools` strips the
+ * mutating ones from the request, `dontAsk` turns any prompt into a denial, and
+ * a PreToolUse hook enforces the workspace boundary on every call. Settings,
+ * skills, plugins and CLAUDE.md stay unloaded (`settingSources: []`), so
+ * nothing on disk can widen that surface.
  */
 const BASE_OPTIONS: Options = {
   systemPrompt: SYSTEM_PROMPT,
-  tools: [],
+  tools: [...READ_ONLY_TOOLS],
+  disallowedTools: DENIED_TOOLS,
+  permissionMode: 'dontAsk',
   settingSources: [],
   includePartialMessages: true,
   persistSession: false,
@@ -57,6 +71,7 @@ const EXECUTABLE = process.env.POLARIS_CLAUDE_EXECUTABLE;
 export function createClaudeProvider(run: QueryFn = query): ModelProvider {
   return {
     id: 'claude',
+    access: CLAUDE_TOOL_ACCESS,
     async createSession(session: ProviderSessionOptions): Promise<ModelSession> {
       const queue = createMessageQueue();
       // The runtime owns the conversation: one `query()` spans the whole Polaris
@@ -68,6 +83,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       // after the first turn.
       let frames: AsyncIterator<SDKMessage> | null = null;
       let model = session.model ?? 'default';
+      const translator = new ClaudeToolTranslator(session.cwd);
 
       function start(): ClaudeRun {
         if (active) return active;
@@ -77,6 +93,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
             options: {
               ...BASE_OPTIONS,
               cwd: session.cwd,
+              hooks: { PreToolUse: [{ hooks: [workspaceGuard(session.cwd)] }] },
               ...(session.model ? { model: session.model } : {}),
               ...(EXECUTABLE ? { pathToClaudeCodeExecutable: EXECUTABLE } : {}),
             },
@@ -124,6 +141,12 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
                 if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
                   yield { type: 'text-delta', text: event.delta.text };
                 }
+                continue;
+              }
+              // Tool calls arrive in assistant messages, their results in user
+              // messages; both are normalized into the shared event protocol.
+              if (message.type === 'assistant' || message.type === 'user') {
+                for (const event of translator.translate(message)) yield event;
                 continue;
               }
               // A `result` message closes the turn — success, failure or

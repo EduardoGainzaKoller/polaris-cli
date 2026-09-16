@@ -1,5 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
+import { toolFinished, toolResultText, toolStarted } from '../../tools/events.ts';
+import { MAX_TOOL_ROUNDS } from '../../tools/limits.ts';
+import { createReadOnlyRegistry, POLARIS_TOOL_ACCESS } from '../../tools/registry.ts';
 import type {
   ModelEvent,
   ModelProvider,
@@ -24,12 +28,21 @@ const EFFORT = 'medium';
 const SYSTEM_PROMPT = [
   'You are Polaris, a coding assistant running inside an interactive terminal CLI.',
   'Answer in plain text: the terminal does not render Markdown yet.',
-  'Be concise and concrete. You have no tools and no access to the filesystem;',
-  'if something would require reading files or running commands, say so.',
+  'You can inspect the workspace with read_file, glob_files and grep_text. Paths are',
+  'relative to the workspace root. Look at the code before answering questions about it.',
+  'Your access is read-only: you cannot create, edit, move or delete files, or run commands.',
+  'If asked to change something, say so and describe the change instead.',
 ].join(' ');
 
+/**
+ * Polaris owns the agent loop here, because the Messages API is stateless:
+ * stream a response, run the tools it asks for, send the results back, repeat.
+ * The SDK's Tool Runner would hide the per-call events the UI renders, so the
+ * loop is written out — it is short.
+ */
 export const anthropicApiProvider: ModelProvider = {
   id: 'anthropic-api',
+  access: POLARIS_TOOL_ACCESS,
   async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
     // Credentials are resolved by the SDK itself (ANTHROPIC_API_KEY,
     // ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile). Polaris never
@@ -42,9 +55,14 @@ export const anthropicApiProvider: ModelProvider = {
     }
 
     const model = options.model ?? DEFAULT_MODEL;
-    // The conversation lives here: the Messages API is stateless, so the full
-    // history is replayed every turn. This is the only place in Polaris that
-    // knows Anthropic's message shape.
+    const registry = createReadOnlyRegistry();
+    const tools: Anthropic.Tool[] = registry.list().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: { ...tool.inputSchema, required: [...tool.inputSchema.required] },
+    }));
+    // The conversation lives here and is replayed every request. This is the
+    // only place in Polaris that knows Anthropic's message shape.
     const messages: Anthropic.MessageParam[] = [];
 
     return {
@@ -53,35 +71,81 @@ export const anthropicApiProvider: ModelProvider = {
         signal?.throwIfAborted();
         messages.push({ role: 'user', content: input });
 
-        let answer = '';
+        let settled = false;
+        let partial = '';
         try {
-          const stream = client.messages.stream(
-            {
-              model,
-              max_tokens: MAX_TOKENS,
-              system: SYSTEM_PROMPT,
-              output_config: { effort: EFFORT },
-              messages,
-            },
-            signal ? { signal } : {},
-          );
-
           yield { type: 'message-start' };
-          for await (const event of stream) {
-            if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-              answer += event.delta.text;
-              yield { type: 'text-delta', text: event.delta.text };
+
+          for (let round = 1; ; round += 1) {
+            if (round > MAX_TOOL_ROUNDS) {
+              throw new PolarisError(
+                `Stopped after ${MAX_TOOL_ROUNDS} tool rounds without a final answer.`,
+              );
             }
+
+            partial = '';
+            const stream = client.messages.stream(
+              {
+                model,
+                max_tokens: MAX_TOKENS,
+                system: SYSTEM_PROMPT,
+                output_config: { effort: EFFORT },
+                tools,
+                messages,
+              },
+              signal ? { signal } : {},
+            );
+            for await (const event of stream) {
+              if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+                partial += event.delta.text;
+                yield { type: 'text-delta', text: event.delta.text };
+              }
+            }
+            const message = await stream.finalMessage();
+            // The full content goes back into history — tool_use blocks included —
+            // so the next request sees exactly what the model produced.
+            messages.push({ role: 'assistant', content: message.content });
+            partial = '';
+
+            const calls = message.content.filter(
+              (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
+            );
+            if (message.stop_reason !== 'tool_use' || calls.length === 0) break;
+
+            for (const call of calls) yield toolStarted(registry, call.id, call.name, call.input);
+            // Read-only calls are independent, so parallel requests run in parallel.
+            const results = await Promise.all(
+              calls.map((call) =>
+                registry.execute(call.name, call.input, {
+                  cwd: options.cwd,
+                  ...(signal ? { signal } : {}),
+                }),
+              ),
+            );
+            for (const [index, result] of results.entries()) {
+              const call = calls[index] as Anthropic.ToolUseBlock;
+              yield toolFinished(call.id, result);
+            }
+            // Every result in a single user message, errors included: splitting
+            // them, or dropping failures, degrades the model's tool use.
+            messages.push({
+              role: 'user',
+              content: results.map((result, index) => ({
+                type: 'tool_result',
+                tool_use_id: (calls[index] as Anthropic.ToolUseBlock).id,
+                content: toolResultText(result),
+                ...(result.ok ? {} : { is_error: true }),
+              })),
+            });
           }
+
+          settled = true;
           yield { type: 'message-end' };
         } catch (error) {
-          // Cancellation is the REPL's business, not a provider failure.
-          if (signal?.aborted) throw error;
+          if (signal?.aborted || error instanceof PolarisError) throw error;
           throw toPolarisError(error);
         } finally {
-          // Even a partial answer is a valid assistant turn; dropping it would
-          // leave the next request without the context the user just read.
-          if (answer.length > 0) messages.push({ role: 'assistant', content: answer });
+          if (!settled) repairHistory(messages, partial);
           debug('anthropic', 'turn finished, history entries', messages.length);
         }
       },
@@ -95,3 +159,31 @@ export const anthropicApiProvider: ModelProvider = {
     };
   },
 };
+
+/**
+ * A turn that stopped early must still leave a history the API accepts on the
+ * next request. A `tool_use` without its `tool_result` is rejected, so pending
+ * calls are answered as cancelled; a partially streamed answer is kept, because
+ * the user already read it.
+ */
+function repairHistory(messages: Anthropic.MessageParam[], partial: string): void {
+  const last = messages.at(-1);
+  if (last?.role === 'assistant' && Array.isArray(last.content)) {
+    const pending = last.content.filter(
+      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
+    );
+    if (pending.length > 0) {
+      messages.push({
+        role: 'user',
+        content: pending.map((block) => ({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: 'Cancelled before the tool finished.',
+          is_error: true,
+        })),
+      });
+      return;
+    }
+  }
+  if (partial.length > 0) messages.push({ role: 'assistant', content: partial });
+}

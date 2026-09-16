@@ -2,7 +2,7 @@ import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CommandRegistry } from '../../cli/commands/registry.ts';
 import { parseCommand } from '../../cli/commands/types.ts';
-import type { AppState, PolarisApp, UiMessage } from '../../core/app.ts';
+import type { AppState, PolarisApp } from '../../core/app.ts';
 import { toUserMessage } from '../../core/errors.ts';
 import {
   clamp,
@@ -10,6 +10,7 @@ import {
   maxScroll,
   statusLabel,
   statusSegments,
+  type TranscriptLine,
   transcriptLines,
 } from '../layout.ts';
 import { colors } from '../theme.ts';
@@ -133,7 +134,7 @@ export function App({ app, registry }: { app: PolarisApp; registry: CommandRegis
           <Text
             // biome-ignore lint/suspicious/noArrayIndexKey: positional rows in a fixed window
             key={index}
-            {...colorProp(lineColor(line.role, line.state))}
+            {...colorProp(lineColor(line))}
             bold={line.kind === 'label'}
           >
             {line.text || ' '}
@@ -202,10 +203,12 @@ function colorProp(color: string | undefined): { color?: string } {
   return color ? { color } : {};
 }
 
-function lineColor(role: UiMessage['role'], state: UiMessage['state']): string | undefined {
-  if (state === 'error') return colors.error;
-  if (role === 'user') return colors.user;
-  if (role === 'system') return colors.muted;
+function lineColor(line: TranscriptLine): string | undefined {
+  if (line.state === 'error') return colors.error;
+  if (line.kind === 'detail') return colors.muted;
+  if (line.kind === 'tool') return line.state === 'complete' ? undefined : colors.muted;
+  if (line.role === 'user') return colors.user;
+  if (line.role === 'system') return colors.muted;
   return undefined;
 }
 

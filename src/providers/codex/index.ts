@@ -9,29 +9,36 @@ import type {
 } from '../provider.ts';
 import { type Connect, connectToAppServer, type JsonObject } from './app-server.ts';
 import { notAuthenticated, toPolarisError, turnFailed } from './errors.ts';
+import { CODEX_TOOL_ACCESS, isToolItem, itemCompleted, itemStarted } from './items.ts';
 
 /**
- * v0.3 integrates the Codex runtime, not its capabilities: the thread runs
- * read-only and never asks for approvals, and any approval request that reaches
- * us anyway is declined. Polaris has no approval UI yet, and silently accepting
- * would be the wrong default.
+ * Codex keeps its own agent loop and may inspect the workspace, but only inside
+ * a read-only sandbox (which also has no network). It never asks for approval,
+ * and any approval request that reaches Polaris anyway is declined — there is
+ * no approval UI yet, and accepting silently would be the wrong default. Web
+ * search is turned off explicitly, whatever the user's Codex config says.
  */
-const THREAD_DEFAULTS = { sandbox: 'read-only', approvalPolicy: 'never' } as const;
+const THREAD_DEFAULTS = {
+  sandbox: 'read-only',
+  approvalPolicy: 'never',
+  config: { web_search: 'disabled' },
+} as const;
 
 /**
- * Codex streams far more than Polaris renders today — reasoning deltas, plans,
- * command output, file diffs, token usage, rate limits. They are ignored on
- * purpose: `ModelEvent` grows in a later phase, and an unknown notification must
- * never break a session.
+ * Codex streams far more than Polaris renders. Agent text and tool-like items
+ * (commands, file changes, searches) are translated; reasoning deltas, plans,
+ * command output streams, diffs, token usage and rate limits are ignored on
+ * purpose, and an unknown notification never breaks a session.
  */
 const RENDERED = 'item/agentMessage/delta';
 
 export function createCodexProvider(connect: Connect = connectToAppServer): ModelProvider {
   return {
     id: 'codex',
+    access: CODEX_TOOL_ACCESS,
     async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
       const connection = await connect();
-      const turns = new TurnRouter();
+      const turns = new TurnRouter(options.cwd);
       connection.onNotification((method, params) => turns.handle(method, params));
       connection.onRequest(decline);
       connection.onClose((error) => turns.abortAll(error));
@@ -107,6 +114,10 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
                 yield { type: 'text-delta', text: event.text };
                 continue;
               }
+              if (event.type === 'tool') {
+                yield event.event;
+                continue;
+              }
               if (signal?.aborted) signal.throwIfAborted();
               if (event.type === 'failed') throw turnFailed(event.detail);
             }
@@ -154,6 +165,7 @@ function decline(method: string): unknown {
 
 type TurnEvent =
   | { type: 'delta'; text: string }
+  | { type: 'tool'; event: ModelEvent }
   | { type: 'completed' }
   | { type: 'failed'; detail: string | undefined };
 
@@ -161,6 +173,11 @@ type TurnEvent =
 class TurnRouter {
   #open = new Set<Turn>();
   #byId = new Map<string, Turn>();
+  readonly #cwd: string;
+
+  constructor(cwd: string) {
+    this.#cwd = cwd;
+  }
 
   open(): Turn {
     const turn = new Turn();
@@ -188,7 +205,16 @@ class TurnRouter {
 
     if (method === RENDERED) {
       const text = typeof params.delta === 'string' ? params.delta : '';
-      if (text.length > 0) this.#route(turnId)?.push({ type: 'delta', text });
+      const turn = this.#route(turnId);
+      if (!turn || text.length === 0) return;
+      // Codex may answer in several agent messages; keep them as paragraphs
+      // instead of running the second one into the first.
+      const itemId = typeof params.itemId === 'string' ? params.itemId : undefined;
+      if (itemId && turn.lastItem && turn.lastItem !== itemId) {
+        turn.push({ type: 'delta', text: '\n\n' });
+      }
+      if (itemId) turn.lastItem = itemId;
+      turn.push({ type: 'delta', text });
       return;
     }
     if (method === 'turn/completed') {
@@ -206,6 +232,14 @@ class TurnRouter {
       this.#route(turnId)?.push({ type: 'failed', detail: detailOf(params) });
       return;
     }
+    if ((method === 'item/started' || method === 'item/completed') && isToolItem(params.item)) {
+      const event =
+        method === 'item/started'
+          ? itemStarted(params.item, this.#cwd)
+          : itemCompleted(params.item);
+      this.#route(turnId)?.push({ type: 'tool', event });
+      return;
+    }
     debug('codex', 'ignoring', method);
   }
 
@@ -219,6 +253,8 @@ class TurnRouter {
 
 class Turn {
   id: string | undefined;
+  /** The agent message the latest text delta belonged to. */
+  lastItem: string | undefined;
   #queue: TurnEvent[] = [];
   #wake: (() => void) | null = null;
   #done = false;
