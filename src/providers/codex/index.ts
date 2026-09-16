@@ -120,6 +120,10 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
             turns.close(turn);
           }
         },
+        async listModels() {
+          const page = await connection.request<ModelListResponse>('model/list', { limit: 50 });
+          return (page.items ?? page.models ?? []).map((entry) => entry.id).filter(Boolean);
+        },
         async close() {
           turns.abortAll(new Error('session closed'));
           await connection.close();
@@ -269,4 +273,10 @@ interface ThreadStartResponse {
 
 interface TurnStartResponse {
   turn: { id: string };
+}
+
+/** The list has been served under both keys; accept either rather than guess. */
+interface ModelListResponse {
+  items?: Array<{ id: string }>;
+  models?: Array<{ id: string }>;
 }

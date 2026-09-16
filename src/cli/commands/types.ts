@@ -1,11 +1,15 @@
-import type { Session } from '../../core/session.ts';
+import type { PolarisApp } from '../../core/app.ts';
 
 export interface CommandContext {
-  readonly session: Session;
-  /** Ask the REPL to shut down after this command finishes. */
-  requestExit(): void;
-  /** Wipe the visible scrollback without touching session state. */
+  readonly app: PolarisApp;
+  /** False for UIs with no picker (a pipe, a future non-interactive renderer). */
+  readonly canSelect: boolean;
+  /** Ask the user to choose; null when they cancelled. */
+  select(title: string, options: string[]): Promise<string | null>;
+  /** Wipe the visible scrollback; session state is untouched. */
   clearScreen(): void;
+  /** Ask the UI to shut down after this command finishes. */
+  requestExit(): void;
 }
 
 export interface Command {

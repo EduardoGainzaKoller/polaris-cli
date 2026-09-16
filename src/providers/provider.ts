@@ -30,6 +30,11 @@ export interface ModelSession {
    * successive calls are multi-turn. `signal` cancels the turn (Ctrl+C).
    */
   send(input: string, signal?: AbortSignal): AsyncIterable<ModelEvent>;
+  /**
+   * Model ids this session can switch to. Optional: a provider that offers no
+   * discovery simply omits it, and Polaris says so instead of guessing.
+   */
+  listModels?(): Promise<string[]>;
   close(): Promise<void>;
 }
 

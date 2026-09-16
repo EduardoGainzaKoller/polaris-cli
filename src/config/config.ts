@@ -1,6 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { debug } from '../core/logger.ts';
 
 export interface PolarisConfig {
@@ -10,8 +10,12 @@ export interface PolarisConfig {
 
 const DEFAULTS: PolarisConfig = { provider: 'mock' };
 
+export function polarisHome(): string {
+  return process.env.POLARIS_HOME ?? join(homedir(), '.polaris');
+}
+
 export function configPath(): string {
-  return join(process.env.POLARIS_HOME ?? join(homedir(), '.polaris'), 'config.json');
+  return join(polarisHome(), 'config.json');
 }
 
 /**
@@ -29,4 +33,20 @@ export async function loadConfig(): Promise<PolarisConfig> {
     debug('config', 'using defaults:', (error as Error).message);
     return { ...DEFAULTS };
   }
+}
+
+/** Writes the config Polaris is currently running with, creating the directory if needed. */
+export async function saveConfig(config: PolarisConfig): Promise<string> {
+  const path = configPath();
+  await mkdir(dirname(path), { recursive: true });
+  const stored: PolarisConfig = { provider: config.provider };
+  if (config.model) stored.model = config.model;
+  await writeFile(
+    path,
+    `${JSON.stringify(stored, null, 2)}
+`,
+    'utf8',
+  );
+  debug('config', 'saved', path);
+  return path;
 }

@@ -3,6 +3,7 @@
     "target": "ES2023",
     "lib": ["ES2023"],
     "module": "NodeNext",
+    "jsx": "react-jsx",
     "moduleResolution": "nodenext",
     "rootDir": "src",
     "outDir": "dist",

@@ -85,6 +85,10 @@ export const anthropicApiProvider: ModelProvider = {
           debug('anthropic', 'turn finished, history entries', messages.length);
         }
       },
+      async listModels() {
+        const page = await client.models.list({ limit: 50 });
+        return page.data.map((entry) => entry.id);
+      },
       async close() {
         messages.length = 0;
       },

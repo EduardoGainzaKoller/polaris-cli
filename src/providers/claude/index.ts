@@ -22,6 +22,7 @@ import { toPolarisError, turnFailure } from './errors.ts';
  */
 export interface ClaudeRun extends AsyncIterable<SDKMessage> {
   interrupt(): Promise<unknown>;
+  supportedModels(): Promise<Array<{ value: string }>>;
   return(value?: unknown): Promise<unknown>;
 }
 
@@ -146,6 +147,10 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
             signal?.removeEventListener('abort', onAbort);
             debug('claude', 'turn finished, model', model);
           }
+        },
+        async listModels() {
+          const models = await start().supportedModels();
+          return models.map((entry) => entry.value);
         },
         async close() {
           queue.close();

@@ -80,6 +80,12 @@ export class Session {
     }
   }
 
+  /** null when this provider cannot enumerate models. */
+  async listModels(): Promise<string[] | null> {
+    if (!this.#model?.listModels) return null;
+    return this.#model.listModels();
+  }
+
   clearHistory(): void {
     this.#history = [];
   }

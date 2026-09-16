@@ -1,32 +1,34 @@
 # Polaris
 
-An interactive CLI for working with coding agents. You run `polaris` once and keep a
-conversation going, instead of firing one-shot commands. Answers stream token by token
-and Ctrl+C cancels a single turn without killing the session.
+A terminal application for working with coding agents. You run `polaris` once and keep a
+conversation going: answers stream in, the provider and model are always on screen, and
+Ctrl+C cancels a single turn without killing the session.
 
 ```text
-  ✦ Polaris
+ ✦ POLARIS  my-project                                          codex · gpt-5.6-luna
+ ──────────────────────────────────────────────────────────────────────────────────
 
-  ~/projects/example
-  claude · claude-sonnet-5
+ You
+ Explícame la arquitectura de este proyecto
 
-❯ Hola, me llamo Eduardo
+ Polaris
+ El proyecto separa el núcleo de la interfaz…
 
-Hola Eduardo, ¿en qué puedo ayudarte?
-
-❯ ¿Cómo me llamo?
-
-Te llamas Eduardo.
-
-❯ /exit
-
-Goodbye.
+╭──────────────────────────────────────────────────────────────────────────────────╮
+│ > Ask Polaris…                                                                   │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+ codex · gpt-5.6-luna    ~/projects/my-project                              ready
 ```
+
+Polaris renders full-screen when it owns a terminal, and falls back to a plain
+line-by-line renderer when its output is piped — both drive the same core.
 
 ## Requirements
 
-Node.js >= 22.6 (24 recommended). Two runtime dependencies, both official Anthropic
-packages: `@anthropic-ai/sdk` and `@anthropic-ai/claude-agent-sdk`.
+Node.js >= 22.6 (24 recommended). Runtime dependencies: the official
+`@anthropic-ai/sdk` and `@anthropic-ai/claude-agent-sdk`, plus `ink` and `react` for the
+terminal UI. The Codex provider needs no package — it drives the Codex CLI you already
+have.
 
 ## Install (local development)
 
@@ -47,11 +49,7 @@ cd ~/projects/example
 polaris
 ```
 
-While developing you can skip the build — Node runs the TypeScript sources directly:
-
-```bash
-npm run dev
-```
+During development, `npm run dev` compiles and runs in one step.
 
 ## Providers
 
@@ -157,42 +155,63 @@ Override any of them with `polaris --model <id>`, or with `{"model": "..."}` in
 | --- | --- |
 | `/help` | Show available commands |
 | `/status` | Show cwd, provider, model and turn count |
-| `/clear` | Clear the terminal (session state is kept) |
+| `/provider [id]` | Switch provider — with no id, pick one from a list |
+| `/model [id]` | Switch model — with no id, pick from what the provider reports |
+| `/config [save]` | Show the configuration, or save the current provider and model |
+| `/clear` | Clear the transcript (the provider keeps its conversation) |
 | `/exit` | Exit Polaris (`exit`, `quit`, `/q` also work) |
 
-Flags: `--provider <id>`, `--model <id>`, `--debug`, `--version`, `--help`.
+Type `/` to see the commands; Tab completes a unique prefix. Flags:
+`--provider <id>`, `--model <id>`, `--debug`, `--version`, `--help`.
 
-### Ctrl+C
+### Keyboard
 
-* While Claude is answering, Ctrl+C cancels **that turn only** — the conversation stays
-  open and keeps the partial answer as context.
-* While typing, Ctrl+C discards the current line and arms an exit.
-* Ctrl+C again on an empty line — or Ctrl+D — exits cleanly.
+| Key | Does |
+| --- | --- |
+| `Enter` | Send |
+| `Ctrl+C` | Cancel the running turn; with an empty composer, exit |
+| `Ctrl+D` | Exit (empty composer) |
+| `PageUp` / `PageDown` | Scroll the transcript (`↑n` in the status bar means you scrolled up) |
+| `←` `→` `Home` `End` | Move the cursor (`Ctrl+A` / `Ctrl+E` also work) |
+| `Tab` | Complete a slash command |
+| `↑` `↓` `Enter` `Esc` | Move, choose and cancel inside a picker |
+
+Cancelling never ends the session: the turn stops, whatever arrived stays on screen, and
+the next message continues the same conversation.
 
 ## Configuration
 
-Optional, and only read at startup:
+Read at startup, written only when you ask:
 
 ```jsonc
 // ~/.polaris/config.json
 { "provider": "claude" }
 ```
 
-A missing or malformed file is not an error; Polaris falls back to defaults (and explains
-why under `--debug`). `POLARIS_HOME` overrides the directory.
+`/config` shows what is in effect; `/config save` writes the session's current provider
+and model there, so the next `polaris` starts the same way. A missing or malformed file
+is not an error — Polaris falls back to defaults (and says why under `--debug`).
+`POLARIS_HOME` overrides the directory.
+
+### Debug output
+
+`polaris --debug` normally logs to stderr, but the full-screen UI owns the terminal, so
+there it writes to `~/.polaris/logs/polaris.log` instead (the path is printed at
+startup). Credentials are never logged, in either mode.
 
 ## Architecture
 
 ```text
 src/
   main.ts              entry point: flags, config, provider registration, error boundary
-  cli/
-    repl.ts            input loop, prompt, Ctrl+C policy
-    commands/          command registry + built-ins (no if/else chain)
   core/
-    session.ts         cwd, transcript, turn lifecycle
+    app.ts             PolarisApp — headless controller: transcript, status, switching
+    session.ts         cwd, turn lifecycle over one provider session
     errors.ts          PolarisError = message safe to show the user
-    logger.ts          debug logging, always to stderr
+    logger.ts          debug logging (stderr, or a file while the TUI owns the terminal)
+  cli/
+    repl.ts            line renderer for pipes and scripts
+    commands/          command registry + built-ins (no if/else chain)
   providers/
     provider.ts        ModelProvider / ModelSession / ModelEvent + registry
     mock/              offline echo provider (streams, like the real one)
@@ -202,15 +221,23 @@ src/
       app-server.ts    the process + protocol seam; tests replace it wholesale
   config/config.ts     ~/.polaris/config.json
   ui/
-    output.ts          banner, tables, errors
-    stream.ts          renders a model stream as continuous text
+    tui/               Ink components: App, Composer, Selector
+    layout.ts          wrapping, viewport and status-bar maths (pure, unit-tested)
+    theme.ts           the whole palette
+    output.ts          plain-text output for the fallback renderer
 ```
 
 The data flow for one turn:
 
 ```text
-REPL → Session → ModelSession → provider backend → ModelEvent → renderer → terminal
+UI → PolarisApp → Session → ModelSession → provider backend
+                                              ↓
+terminal ← renderer ← AppState ← PolarisApp ← ModelEvent
 ```
+
+The UI never touches a provider and a provider never draws anything. `PolarisApp` sits
+between them, which is why the same core serves both the full-screen TUI and the
+line-based renderer — and will serve a future non-interactive `polaris run`.
 
 The translation to `ModelEvent` happens inside each provider, so the renderer never sees
 an Anthropic stream event or an Agent SDK message.
@@ -234,7 +261,11 @@ These rules keep this able to grow:
    context (Polaris owns that history), while `claude` calls `interrupt()` and `codex`
    calls `turn/interrupt`, letting each runtime decide what its own transcript keeps.
    In all three the session stays open for the next prompt.
-4. **A richer protocol is narrowed at the provider, not in the UI.** Codex streams
+4. **The visual transcript is presentation, never truth.** `PolarisApp` keeps the
+   messages the user sees; the conversation itself belongs to the provider. `/clear`
+   therefore clears pixels, and switching provider starts a genuinely new context — which
+   Polaris says out loud instead of pretending otherwise.
+5. **A richer protocol is narrowed at the provider, not in the UI.** Codex streams
    reasoning, plans, command output, diffs, usage and rate limits; v0.3 renders only
    `item/agentMessage/delta` and ignores the rest by design. Unknown events are logged
    under `--debug` and never break a session.
@@ -247,7 +278,7 @@ history are deliberately *not* here yet.
 ## Scripts
 
 ```bash
-npm run dev        # run from source, no build
+npm run dev        # build and run
 npm run build      # tsc -> dist/
 npm run typecheck  # tsc --noEmit
 npm test           # node:test — no network, no credentials, no quota
@@ -257,4 +288,6 @@ npm run format     # biome --write
 
 Tests never reach a real model and never spend quota. `anthropic-api` runs against a
 local server speaking the Messages streaming protocol; `claude` and `codex` run against
-fake runtimes injected through `createClaudeProvider()` and `createCodexProvider()`.
+fake runtimes injected through `createClaudeProvider()` and `createCodexProvider()`. The
+interface is tested where it is worth testing — controller state and layout maths — not
+by snapshotting ANSI output.

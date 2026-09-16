@@ -30,6 +30,9 @@ export const mockProvider: ModelProvider = {
         }
         yield { type: 'message-end' };
       },
+      async listModels() {
+        return ['echo', 'echo-uppercase'];
+      },
       async close() {
         history.length = 0;
       },

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runRepl } from './cli/repl.ts';
-import { loadConfig } from './config/config.ts';
+import { loadConfig, polarisHome } from './config/config.ts';
+import { PolarisApp } from './core/app.ts';
 import { toUserMessage } from './core/errors.ts';
-import { debug, isDebug, setDebug } from './core/logger.ts';
-import { Session } from './core/session.ts';
+import { debug, isDebug, setDebug, setLogFile } from './core/logger.ts';
 import { anthropicApiProvider } from './providers/anthropic-api/index.ts';
 import { claudeProvider } from './providers/claude/index.ts';
 import { codexProvider } from './providers/codex/index.ts';
@@ -59,11 +60,27 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   if (values.model) config.model = values.model;
   debug('main', 'cwd', cwd, 'config', config);
 
-  const session = new Session({ cwd, config });
-  await session.start();
+  const app = new PolarisApp({ cwd, config });
+  await app.start();
 
-  ui.banner(cwd, session.providerId, session.modelId);
-  await runRepl(session);
+  // The TUI needs a terminal it owns; anything else (pipes, scripts, CI) gets
+  // the line renderer, which drives the very same controller.
+  const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true;
+  if (interactive && isDebug()) {
+    const file = setLogFile(join(polarisHome(), 'logs', 'polaris.log'));
+    ui.line(`debug log: ${file}`);
+  }
+
+  try {
+    if (interactive) {
+      const { runTui } = await import('./ui/tui/index.tsx');
+      await runTui(app);
+    } else {
+      await runRepl(app);
+    }
+  } finally {
+    await app.close();
+  }
   return 0;
 }
 
