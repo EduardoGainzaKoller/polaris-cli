@@ -1,4 +1,5 @@
 import {
+  type EffortLevel,
   type Options,
   query,
   type SDKMessage,
@@ -30,7 +31,22 @@ import {
 export interface ClaudeRun extends AsyncIterable<SDKMessage> {
   interrupt(): Promise<unknown>;
   supportedModels(): Promise<Array<{ value: string }>>;
+  applyFlagSettings(settings: { effortLevel?: EffortLevel | null }): Promise<void>;
   return(value?: unknown): Promise<unknown>;
+}
+
+/** The runtime's `EffortLevel` values. */
+const EFFORT_LEVELS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const satisfies readonly EffortLevel[];
+
+function asEffort(level: string): EffortLevel {
+  if ((EFFORT_LEVELS as readonly string[]).includes(level)) return level as EffortLevel;
+  throw new PolarisError(`Unknown effort "${level}". Use one of: ${EFFORT_LEVELS.join(', ')}.`);
 }
 
 export type QueryFn = (args: {
@@ -83,6 +99,8 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       // after the first turn.
       let frames: AsyncIterator<SDKMessage> | null = null;
       let model = session.model ?? 'default';
+      let effort: EffortLevel | undefined =
+        session.effort === undefined ? undefined : asEffort(session.effort);
       const translator = new ClaudeToolTranslator(session.cwd);
 
       function start(): ClaudeRun {
@@ -95,6 +113,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
               cwd: session.cwd,
               hooks: { PreToolUse: [{ hooks: [workspaceGuard(session.cwd)] }] },
               ...(session.model ? { model: session.model } : {}),
+              ...(effort ? { effort } : {}),
               ...(EXECUTABLE ? { pathToClaudeCodeExecutable: EXECUTABLE } : {}),
             },
           });
@@ -107,6 +126,19 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       return {
         get model() {
           return model;
+        },
+        get effort() {
+          return effort;
+        },
+        async efforts() {
+          return [...EFFORT_LEVELS];
+        },
+        async setEffort(level) {
+          const next = asEffort(level);
+          // A running session takes the change live through the runtime's own
+          // flag layer; before the first turn it is simply passed at start.
+          if (active) await active.applyFlagSettings({ effortLevel: next });
+          effort = next;
         },
         async *send(input, signal): AsyncIterable<ModelEvent> {
           signal?.throwIfAborted();

@@ -44,7 +44,25 @@ function fakeCodex(options: FakeOptions = {}) {
         return { authMethod, authToken: null } as T;
       }
       if (method === 'thread/start') {
-        return { thread: { id: THREAD }, model: MODEL } as T;
+        return { thread: { id: THREAD }, model: MODEL, reasoningEffort: 'medium' } as T;
+      }
+      if (method === 'model/list') {
+        // Shape from `codex app-server generate-ts`: the catalog is under `data`.
+        return {
+          data: [
+            {
+              id: MODEL,
+              model: MODEL,
+              hidden: false,
+              supportedReasoningEfforts: [
+                { reasoningEffort: 'low', description: '' },
+                { reasoningEffort: 'medium', description: '' },
+                { reasoningEffort: 'high', description: '' },
+              ],
+            },
+            { id: 'internal', model: 'internal', hidden: true, supportedReasoningEfforts: [] },
+          ],
+        } as T;
       }
       if (method === 'turn/start') {
         const turnId = `turn-${++turnCount}`;
@@ -331,6 +349,30 @@ test('sandboxed commands in a turn surface as tool events before the answer', as
     target: '"ModelProvider"',
   });
   assert.deepEqual(events[2], { type: 'tool-result', id: 'call_1', summary: '1 match' });
+  await session.close();
+});
+
+test('model discovery reads the catalog Codex actually returns, hiding internal models', async () => {
+  const codex = fakeCodex();
+  const session = await createCodexProvider(codex.connect).createSession({ cwd: '/tmp' });
+  assert.deepEqual(await session.listModels?.(), [MODEL]);
+  await session.close();
+});
+
+test('effort comes from the model catalog and is sent with every turn', async () => {
+  const codex = fakeCodex({ replies: [['a'], ['b']] });
+  const session = await createCodexProvider(codex.connect).createSession({ cwd: '/tmp' });
+
+  assert.equal(session.effort, 'medium', 'the thread reports its starting effort');
+  assert.deepEqual(await session.efforts?.(), ['low', 'medium', 'high']);
+
+  await session.setEffort?.('high');
+  await collect(session.send('hola'));
+  assert.equal(codex.requestsFor('turn/start').at(-1)?.params.effort, 'high');
+  assert.equal(codex.requestsFor('thread/start').length, 1, 'no new thread for an effort change');
+
+  await assert.rejects(() => session.setEffort?.('xhigh') ?? Promise.resolve(), /does not support/);
+  assert.equal(session.effort, 'high');
   await session.close();
 });
 

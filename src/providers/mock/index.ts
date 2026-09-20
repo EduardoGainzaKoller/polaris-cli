@@ -1,3 +1,4 @@
+import { PolarisError } from '../../core/errors.ts';
 import { toolFinished, toolStarted } from '../../tools/events.ts';
 import { createReadOnlyRegistry, POLARIS_TOOL_ACCESS } from '../../tools/registry.ts';
 import type {
@@ -29,6 +30,9 @@ function chunks(text: string): string[] {
   return ['You ', 'said: ', text];
 }
 
+/** Levels the mock pretends to support, so effort selection can be exercised offline. */
+const MOCK_EFFORTS = ['low', 'medium', 'high'] as const;
+
 export const mockProvider: ModelProvider = {
   id: 'mock',
   access: POLARIS_TOOL_ACCESS,
@@ -36,9 +40,22 @@ export const mockProvider: ModelProvider = {
     const registry = createReadOnlyRegistry();
     const history: string[] = [];
     let calls = 0;
+    let effort = options.effort ?? 'medium';
 
     return {
       model: options.model ?? 'echo',
+      get effort() {
+        return effort;
+      },
+      async efforts() {
+        return [...MOCK_EFFORTS];
+      },
+      async setEffort(level) {
+        if (!(MOCK_EFFORTS as readonly string[]).includes(level)) {
+          throw new PolarisError(`Unknown effort "${level}".`);
+        }
+        effort = level;
+      },
       async *send(input, signal): AsyncIterable<ModelEvent> {
         signal?.throwIfAborted();
         history.push(input);

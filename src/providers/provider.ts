@@ -7,6 +7,8 @@ export interface ProviderSessionOptions {
   /** Directory Polaris was launched from; future tools operate inside it. */
   readonly cwd: string;
   readonly model?: string;
+  /** Reasoning effort to start with; the runtime's default when omitted. */
+  readonly effort?: string;
 }
 
 /**
@@ -59,6 +61,18 @@ export interface ModelSession {
    * discovery simply omits it, and Polaris says so instead of guessing.
    */
   listModels?(): Promise<string[]>;
+  /** Reasoning effort in use, when the runtime reports or accepts one. */
+  readonly effort?: string | undefined;
+  /**
+   * Effort levels the current model accepts. Together with `setEffort`, it is
+   * optional: a provider without a notion of effort omits both.
+   */
+  efforts?(): Promise<string[]>;
+  /**
+   * Changes the effort for the following turns without starting a new
+   * conversation. Every runtime Polaris supports can do this live.
+   */
+  setEffort?(effort: string): Promise<void>;
   close(): Promise<void>;
 }
 

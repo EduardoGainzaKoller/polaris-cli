@@ -28,23 +28,41 @@ test('wrapText never loses characters, even for unbreakable words', () => {
   assert.ok(lines.every((line) => line.length <= 10));
 });
 
-test('transcriptLines labels each speaker and marks cancelled answers', () => {
+test('your messages become a padded panel; answers end with a footer or "cancelled"', () => {
   const lines = transcriptLines(
     [
       message({ id: 'a', role: 'user', text: 'hola' }),
       message({ id: 'b', role: 'assistant', text: 'medio', state: 'cancelled' }),
+      message({ id: 'c', role: 'user', text: 'otra' }),
+      message({ id: 'd', role: 'assistant', text: 'bien', meta: 'echo · high · 1.2s' }),
     ],
     40,
   );
-  const rendered = lines.map((line) => line.text);
-  assert.deepEqual(rendered, ['You', 'hola', '', 'Polaris', 'medio', '⌁ cancelled']);
+  assert.deepEqual(
+    lines.map((line) => [line.kind, line.text]),
+    [
+      ['user', ''],
+      ['user', 'hola'],
+      ['user', ''],
+      ['blank', ''],
+      ['text', 'medio'],
+      ['meta', 'cancelled'],
+      ['blank', ''],
+      ['user', ''],
+      ['user', 'otra'],
+      ['user', ''],
+      ['blank', ''],
+      ['text', 'bien'],
+      ['meta', 'echo · high · 1.2s'],
+    ],
+  );
 });
 
 test('a streaming answer with nothing yet shows a placeholder instead of collapsing', () => {
   const lines = transcriptLines([message({ text: '', state: 'streaming' })], 40);
   assert.deepEqual(
     lines.map((line) => line.text),
-    ['Polaris', '…'],
+    ['…'],
   );
 });
 

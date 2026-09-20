@@ -19,11 +19,15 @@ export const DEFAULT_MODEL = 'claude-opus-5';
 const MAX_TOKENS = 32_000;
 
 /**
- * `medium` keeps time-to-first-token short for conversational use. Thinking is
- * left at the model default (adaptive) — Polaris cannot render thinking yet, so
- * asking for it would only add a silent pause.
+ * `medium` keeps time-to-first-token short for conversational use; /effort
+ * changes it per request, so a switch never costs the conversation. Thinking is
+ * left at the model default (adaptive) — Polaris cannot render thinking yet.
  */
-const EFFORT = 'medium';
+const DEFAULT_EFFORT = 'medium';
+
+/** The `output_config.effort` levels of current Claude models. */
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+type Effort = (typeof EFFORTS)[number];
 
 const SYSTEM_PROMPT = [
   'You are Polaris, a coding assistant running inside an interactive terminal CLI.',
@@ -64,9 +68,19 @@ export const anthropicApiProvider: ModelProvider = {
     // The conversation lives here and is replayed every request. This is the
     // only place in Polaris that knows Anthropic's message shape.
     const messages: Anthropic.MessageParam[] = [];
+    let effort: Effort = asEffort(options.effort ?? DEFAULT_EFFORT);
 
     return {
       model,
+      get effort() {
+        return effort;
+      },
+      async efforts() {
+        return [...EFFORTS];
+      },
+      async setEffort(level) {
+        effort = asEffort(level);
+      },
       async *send(input, signal): AsyncIterable<ModelEvent> {
         signal?.throwIfAborted();
         messages.push({ role: 'user', content: input });
@@ -89,7 +103,7 @@ export const anthropicApiProvider: ModelProvider = {
                 model,
                 max_tokens: MAX_TOKENS,
                 system: SYSTEM_PROMPT,
-                output_config: { effort: EFFORT },
+                output_config: { effort },
                 tools,
                 messages,
               },
@@ -186,4 +200,9 @@ function repairHistory(messages: Anthropic.MessageParam[], partial: string): voi
     }
   }
   if (partial.length > 0) messages.push({ role: 'assistant', content: partial });
+}
+
+function asEffort(level: string): Effort {
+  if ((EFFORTS as readonly string[]).includes(level)) return level as Effort;
+  throw new PolarisError(`Unknown effort "${level}". Use one of: ${EFFORTS.join(', ')}.`);
 }

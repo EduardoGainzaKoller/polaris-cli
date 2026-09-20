@@ -77,7 +77,7 @@ test('the registry resolves names and aliases and lists every command', () => {
   assert.equal(commands.get('nope'), undefined);
   assert.deepEqual(
     commands.list().map((command) => command.name),
-    ['clear', 'config', 'exit', 'help', 'model', 'provider', 'status', 'tools'],
+    ['clear', 'config', 'effort', 'exit', 'help', 'model', 'provider', 'status', 'tools'],
   );
 });
 
@@ -206,11 +206,11 @@ test('/config shows the file and values, /config save writes them', async () => 
     assert.match(h.lastNotice(), /provider\s+mock/);
 
     await registry().get('config')?.run(h.context, ['save']);
-    assert.match(h.lastNotice(), /Saved provider and model/);
+    assert.match(h.lastNotice(), /Saved provider, model and effort/);
 
     const written = JSON.parse(await readFile(join(home, 'config.json'), 'utf8')) as unknown;
-    assert.deepEqual(written, { provider: 'mock', model: 'echo' });
-    assert.deepEqual(await loadConfig(), { provider: 'mock', model: 'echo' });
+    assert.deepEqual(written, { provider: 'mock', model: 'echo', effort: 'medium' });
+    assert.deepEqual(await loadConfig(), { provider: 'mock', model: 'echo', effort: 'medium' });
     await h.app.close();
   } finally {
     if (previous === undefined) delete process.env.POLARIS_HOME;

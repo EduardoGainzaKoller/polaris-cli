@@ -4,30 +4,15 @@ import { shortenPath } from './output.ts';
 /** Pure layout maths — no ANSI, no Ink — so it can be unit-tested directly. */
 
 export interface TranscriptLine {
-  readonly kind: 'label' | 'text' | 'blank' | 'tool' | 'detail';
+  readonly kind: 'blank' | 'user' | 'text' | 'meta' | 'tool' | 'detail' | 'notice';
   readonly role: UiMessage['role'];
-  readonly text: string;
   readonly state: UiMessage['state'];
+  readonly text: string;
+  /** Tool name, shown in bold before the target. */
+  readonly label?: string;
+  /** Short outcome shown at the right edge of a tool row. */
+  readonly aside?: string;
 }
-
-const LABELS: Record<UiMessage['role'], string> = {
-  user: 'You',
-  assistant: 'Polaris',
-  system: '',
-  tool: '',
-};
-
-/**
- * One glyph per tool state. All four are in the basic Unicode geometric and
- * math blocks, which Windows Terminal, conhost with a TrueType font, and every
- * common macOS/Linux terminal font render.
- */
-const TOOL_MARKERS: Record<UiMessage['state'], string> = {
-  streaming: '◌',
-  complete: '●',
-  error: '×',
-  cancelled: '◌',
-};
 
 /** Wraps on word boundaries, keeps explicit newlines, never loses characters. */
 export function wrapText(text: string, width: number): string[] {
@@ -60,47 +45,68 @@ export function wrapText(text: string, width: number): string[] {
 }
 
 /**
- * Flattens the transcript into renderable lines: a role label then the body for
- * messages, and a compact one- or two-line entry for each tool call. Consecutive
- * tool calls stay together without blank lines between them.
+ * Flattens the transcript into renderable rows:
+ *
+ * - your messages become a padded panel,
+ * - answers are plain text with a quiet footer (model · effort · time),
+ * - each tool call is one row — name, target, outcome on the right — and
+ *   consecutive calls stay together,
+ * - notices from commands are muted; errors say so.
+ *
+ * `width` is the usable text width; the renderer adds the panel bar and padding.
  */
 export function transcriptLines(messages: readonly UiMessage[], width: number): TranscriptLine[] {
   const lines: TranscriptLine[] = [];
   let previous: UiMessage | undefined;
+  const push = (line: TranscriptLine) => lines.push(line);
 
   for (const message of messages) {
-    const bothTools = previous?.role === 'tool' && message.role === 'tool';
-    if (lines.length > 0 && !bothTools) {
-      lines.push({ kind: 'blank', role: message.role, text: '', state: message.state });
-    }
+    const { role, state } = message;
+    const bothTools = previous?.role === 'tool' && role === 'tool';
+    if (lines.length > 0 && !bothTools) push({ kind: 'blank', role, state, text: '' });
     previous = message;
 
-    if (message.role === 'tool' && message.tool) {
+    if (role === 'tool' && message.tool) {
       const { name, target, detail } = message.tool;
-      const head = `${TOOL_MARKERS[message.state]} ${name}${target ? ` ${target}` : ''}`;
-      for (const text of wrapText(head, width)) {
-        lines.push({ kind: 'tool', role: 'tool', text, state: message.state });
-      }
-      const outcome = message.state === 'cancelled' ? 'cancelled' : detail;
-      if (outcome) {
-        for (const text of wrapText(outcome, Math.max(1, width - 2))) {
-          lines.push({ kind: 'detail', role: 'tool', text: `  ${text}`, state: message.state });
+      const outcome = state === 'cancelled' ? 'cancelled' : detail;
+      // A short success fits beside the row; errors and long outcomes go below.
+      const beside = state === 'complete' && outcome && outcome.length <= 24 ? outcome : undefined;
+      const room = Math.max(8, width - name.length - 4 - (beside ? beside.length + 2 : 0));
+      const [first = '', ...rest] = wrapText(target, room);
+      push({
+        kind: 'tool',
+        role,
+        state,
+        label: name,
+        text: first,
+        ...(beside ? { aside: beside } : {}),
+      });
+      for (const text of rest) push({ kind: 'detail', role, state, text });
+      if (outcome && !beside) {
+        for (const text of wrapText(outcome, Math.max(8, width - 4))) {
+          push({ kind: 'detail', role, state, text });
         }
       }
       continue;
     }
 
-    const label = LABELS[message.role];
-    if (label) {
-      lines.push({ kind: 'label', role: message.role, text: label, state: message.state });
+    if (role === 'user') {
+      push({ kind: 'user', role, state, text: '' });
+      for (const text of wrapText(message.text, width)) push({ kind: 'user', role, state, text });
+      push({ kind: 'user', role, state, text: '' });
+      continue;
     }
-    const body = message.text.length === 0 && message.state === 'streaming' ? '…' : message.text;
-    for (const text of wrapText(body, width)) {
-      lines.push({ kind: 'text', role: message.role, text, state: message.state });
+
+    if (role === 'system') {
+      const body = state === 'error' ? `✗ ${message.text}` : message.text;
+      for (const text of wrapText(body, width)) push({ kind: 'notice', role, state, text });
+      continue;
     }
-    if (message.state === 'cancelled') {
-      lines.push({ kind: 'text', role: 'system', text: '⌁ cancelled', state: 'cancelled' });
-    }
+
+    const body = message.text.length === 0 && state === 'streaming' ? '…' : message.text;
+    for (const text of wrapText(body, width)) push({ kind: 'text', role, state, text });
+    if (state === 'cancelled') push({ kind: 'meta', role, state, text: 'cancelled' });
+    else if (message.meta) push({ kind: 'meta', role, state, text: message.meta });
   }
   return lines;
 }
@@ -167,3 +173,70 @@ export function completions(input: string, names: readonly string[]): string[] {
   if (input.slice(1).includes(' ')) return [];
   return names.filter((name) => name.startsWith(typed.toLowerCase()));
 }
+
+/**
+ * Terminals report the mouse, once asked to, as SGR sequences that reach the
+ * input stream as text: `ESC [ < button ; x ; y M`. Buttons 64 and 65 are the
+ * wheel. Every sequence is recognised so none of it is ever typed into the
+ * composer; the wheel becomes a scroll of `lines` rows per notch.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the escape byte is the protocol
+const MOUSE = /?\[<(\d+);\d+;\d+[Mm]/g;
+
+export function parseMouse(input: string, lines = 3): { isMouse: boolean; scroll: number } {
+  let scroll = 0;
+  let matched = false;
+  for (const [, button] of input.matchAll(MOUSE)) {
+    matched = true;
+    if (button === '64') scroll += lines;
+    if (button === '65') scroll -= lines;
+  }
+  return { isMouse: matched, scroll };
+}
+
+/**
+ * Walks the prompt history like a shell: `null` is "not browsing". Moving
+ * older from the newest entry starts browsing; moving newer past it stops.
+ */
+export function historyStep(
+  length: number,
+  index: number | null,
+  direction: 'older' | 'newer',
+): number | null {
+  if (length === 0) return null;
+  if (direction === 'older') return index === null ? length - 1 : Math.max(0, index - 1);
+  if (index === null) return null;
+  return index >= length - 1 ? null : index + 1;
+}
+
+/** Keyboard hints for the footer, dropped from the end as the terminal narrows. */
+export function footerHints(width: number, busy: boolean): string {
+  const hints = busy
+    ? ['ctrl+c cancel', 'pgup/pgdn scroll', '/help']
+    : ['↑↓ history', 'pgup/pgdn scroll', '/ commands', 'ctrl+c exit'];
+  const shown: string[] = [];
+  let used = 0;
+  for (const hint of hints) {
+    const cost = hint.length + (shown.length > 0 ? 3 : 0);
+    if (used + cost > width) break;
+    shown.push(hint);
+    used += cost;
+  }
+  return shown.join(' · ');
+}
+
+/** Rows the input takes inside the composer, capped so the transcript keeps its space. */
+export function inputRows(value: string, width: number, max = 6): number {
+  if (width <= 0) return 1;
+  const rows = Math.ceil(Math.max(1, value.length + 3) / width);
+  return clamp(rows, 1, max);
+}
+
+/** Half-block lettering for the start screen: "POLAR" and "IS", coloured apart. */
+export const LOGO = [
+  ['█▀█ █▀█ █   █▀█ █▀█ ', '█ █▀▀'],
+  ['█▀▀ █ █ █   █▀█ █▀▄ ', '█ ▀▀█'],
+  ['▀   ▀▀▀ ▀▀▀ ▀ ▀ ▀ ▀ ', '▀ ▀▀▀'],
+] as const;
+
+export const LOGO_WIDTH = LOGO[0][0].length + LOGO[0][1].length;

@@ -6,26 +6,24 @@ provider and model are always on screen, and Ctrl+C cancels a single turn withou
 the session.
 
 ```text
- ✦ POLARIS  my-project                                          codex · gpt-5.6-luna
- ──────────────────────────────────────────────────────────────────────────────────
+ ✦ my-project                                                              v0.5.0
 
- You
- Analiza la arquitectura de este proyecto
+  ┃
+  ┃ Analiza la arquitectura de este proyecto
+  ┃
 
- ● Glob src/**/*.ts
-   31 files
- ● Read package.json
-   42 lines
- ● Grep "ModelProvider"
-   8 matches in 5 files
+  ✓ Glob src/**/*.ts                                                          31 files
+  ✓ Read package.json                                                         42 lines
+  ✓ Grep "ModelProvider"                                          8 matches in 5 files
 
- Polaris
- El proyecto separa el núcleo de la interfaz…
+  El proyecto separa el núcleo de la interfaz…
+  ◇ gpt-5.6-luna · high · 12.4s
 
-╭──────────────────────────────────────────────────────────────────────────────────╮
-│ > Ask Polaris…                                                                   │
-╰──────────────────────────────────────────────────────────────────────────────────╯
- codex · gpt-5.6-luna    ~/projects/my-project                  read-only · ready
+ ╭──────────────────────────────────────────────────────────────────────────────────╮
+ │ > Ask anything, or type / for commands                                           │
+ │  READ-ONLY   codex · gpt-5.6-luna · high                              enter send │
+ ╰──────────────────────────────────────────────────────────────────────────────────╯
+ ● ready   ~/projects/my-project          ↑↓ history · pgup/pgdn scroll · / commands
 ```
 
 Polaris renders full-screen when it owns a terminal, and falls back to a plain
@@ -203,24 +201,33 @@ Override any of them with `polaris --model <id>`, or with `{"model": "..."}` in
 | `/tools` | Show the repository tools available and the capability mode |
 | `/provider [id]` | Switch provider — with no id, pick one from a list |
 | `/model [id]` | Switch model — with no id, pick from what the provider reports |
+| `/effort [level]` | Reasoning effort (`low` … `max`, as the model allows) — changes live, the conversation is kept |
 | `/config [save]` | Show the configuration, or save the current provider and model |
 | `/clear` | Clear the transcript (the provider keeps its conversation) |
 | `/exit` | Exit Polaris (`exit`, `quit`, `/q` also work) |
 
-Type `/` to see the commands; Tab completes a unique prefix. Flags:
+Type `/` to open the command list: ↑↓ to move, Enter to run, Tab to complete and add arguments, Esc to close. Flags:
 `--provider <id>`, `--model <id>`, `--debug`, `--version`, `--help`.
 
-### Keyboard
+### Keyboard and mouse
 
 | Key | Does |
 | --- | --- |
 | `Enter` | Send |
-| `Ctrl+C` | Cancel the running turn; with an empty composer, exit |
-| `Ctrl+D` | Exit (empty composer) |
-| `PageUp` / `PageDown` | Scroll the transcript (`↑n` in the status bar means you scrolled up) |
-| `←` `→` `Home` `End` | Move the cursor (`Ctrl+A` / `Ctrl+E` also work) |
-| `Tab` | Complete a slash command |
-| `↑` `↓` `Enter` `Esc` | Move, choose and cancel inside a picker |
+| `↑` / `↓` | Previous / next prompt or command from your history |
+| `PageUp` / `PageDown` | Scroll the conversation a page |
+| `Shift`/`Ctrl` + `↑` `↓` | Scroll one line |
+| Mouse wheel | Scroll three lines |
+| `Esc` | Jump back to the latest output (or close the command list / a dialog) |
+| `Ctrl+C` | Cancel the running turn; with an empty prompt, exit |
+| `Ctrl+D` | Exit (empty prompt) |
+| `←` `→` `Home` `End`, `Ctrl+A`/`Ctrl+E`, `Ctrl+U` | Edit the prompt |
+
+History covers every prompt and command you send, is kept across sessions in
+`~/.polaris/history.json` (last 500 entries), and skips immediate repeats.
+
+The mouse wheel works because Polaris asks the terminal to report the mouse. While it
+does, most terminals only select text with **Shift** held.
 
 Cancelling never ends the session: the turn stops, whatever arrived stays on screen, and
 the next message continues the same conversation.
@@ -234,8 +241,8 @@ Read at startup, written only when you ask:
 { "provider": "claude" }
 ```
 
-`/config` shows what is in effect; `/config save` writes the session's current provider
-and model there, so the next `polaris` starts the same way. A missing or malformed file
+`/config` shows what is in effect; `/config save` writes the session's current provider,
+model and effort there, so the next `polaris` starts the same way. A missing or malformed file
 is not an error — Polaris falls back to defaults (and says why under `--debug`).
 `POLARIS_HOME` overrides the directory.
 

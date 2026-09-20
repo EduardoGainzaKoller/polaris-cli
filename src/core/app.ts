@@ -39,6 +39,8 @@ export interface UiMessage {
   readonly text: string;
   readonly state: MessageState;
   readonly tool?: ToolCall;
+  /** Footer for a finished answer: model, effort and how long the turn took. */
+  readonly meta?: string;
 }
 
 export interface AppState {
@@ -52,6 +54,8 @@ export interface AppState {
   readonly turns: number;
   /** What the provider may do to the workspace; read-only in v0.5. */
   readonly access: ToolAccess | null;
+  /** Reasoning effort in use; null when the provider has no notion of it. */
+  readonly effort: string | null;
 }
 
 /**
@@ -88,6 +92,7 @@ export class PolarisApp {
       messages: this.#messages,
       turns: this.#session.history.length,
       access: this.#session.access,
+      effort: this.#session.effortId,
     };
   }
 
@@ -118,8 +123,11 @@ export class PolarisApp {
     const controller = new AbortController();
     this.#turn = controller;
     this.#set('thinking');
+    const startedAt = Date.now();
 
     let answer: string | null = null;
+    /** The last answer of the turn, which gets the model and timing footer. */
+    let lastAnswer: string | null = null;
     /** Provider tool id → transcript entry, for tools still running. */
     const running = new Map<string, { entry: string; name: string }>();
 
@@ -133,6 +141,7 @@ export class PolarisApp {
         switch (event.type) {
           case 'text-delta': {
             answer ??= this.#append('assistant', '', 'streaming').id;
+            lastAnswer = answer;
             this.#status = 'streaming';
             const id = answer;
             this.#update(id, (message) => ({ ...message, text: message.text + event.text }));
@@ -153,6 +162,10 @@ export class PolarisApp {
         }
       }
       seal('complete');
+      if (lastAnswer) {
+        const meta = this.#turnFooter(Date.now() - startedAt);
+        this.#update(lastAnswer, (message) => ({ ...message, meta }));
+      }
       this.#set('ready');
     } catch (error) {
       // Whatever was still running never finished.
@@ -212,11 +225,34 @@ export class PolarisApp {
     return true;
   }
 
+  /** "gpt-5.6-luna · high · 4.2s" — what answered, how hard it thought, how long it took. */
+  #turnFooter(elapsedMs: number): string {
+    const effort = this.#session.effortId;
+    const seconds =
+      elapsedMs < 10_000 ? (elapsedMs / 1000).toFixed(1) : Math.round(elapsedMs / 1000);
+    return [this.#session.modelId, effort, `${seconds}s`].filter(Boolean).join(' · ');
+  }
+
   async setProvider(id: string): Promise<void> {
-    // A model id belongs to the provider that offers it, so the override is
-    // dropped and the new provider picks its own default.
-    const { model: _dropped, ...rest } = this.#config;
+    // Model ids and effort levels belong to the provider that offers them, so
+    // both overrides are dropped and the new provider picks its own defaults.
+    const { model: _model, effort: _effort, ...rest } = this.#config;
     await this.#swap({ ...rest, provider: id }, `provider ${id}`);
+  }
+
+  /** null when the provider does not let the effort be chosen. */
+  async listEfforts(): Promise<string[] | null> {
+    return this.#session.listEfforts();
+  }
+
+  /**
+   * Every supported runtime changes effort live, so unlike a model switch this
+   * keeps the conversation.
+   */
+  async setEffort(level: string): Promise<void> {
+    await this.#session.setEffort(level);
+    this.#config = { ...this.#config, effort: level };
+    this.notice(`Effort set to ${level}. It applies from the next message.`);
   }
 
   async setModel(id: string): Promise<void> {

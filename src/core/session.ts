@@ -64,10 +64,11 @@ export class Session {
     if (!provider) {
       throw new PolarisError(`Unknown provider "${this.config.provider}"`);
     }
-    const options = this.config.model
-      ? { cwd: this.cwd, model: this.config.model }
-      : { cwd: this.cwd };
-    this.#model = await provider.createSession(options);
+    this.#model = await provider.createSession({
+      cwd: this.cwd,
+      ...(this.config.model ? { model: this.config.model } : {}),
+      ...(this.config.effort ? { effort: this.config.effort } : {}),
+    });
     this.#access = provider.access;
     debug('session', 'started with', provider.id);
   }
@@ -96,6 +97,24 @@ export class Session {
   async listModels(): Promise<string[] | null> {
     if (!this.#model?.listModels) return null;
     return this.#model.listModels();
+  }
+
+  /** The effort in use, or null when the provider has no notion of it. */
+  get effortId(): string | null {
+    return this.#model?.effort ?? null;
+  }
+
+  /** null when this provider does not let the effort be chosen. */
+  async listEfforts(): Promise<string[] | null> {
+    if (!this.#model?.efforts || !this.#model.setEffort) return null;
+    return this.#model.efforts();
+  }
+
+  async setEffort(effort: string): Promise<void> {
+    if (!this.#model?.setEffort) {
+      throw new PolarisError(`${this.providerId} does not let the effort be changed.`);
+    }
+    await this.#model.setEffort(effort);
   }
 
   clearHistory(): void {

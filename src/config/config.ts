@@ -6,6 +6,8 @@ import { debug } from '../core/logger.ts';
 export interface PolarisConfig {
   provider: string;
   model?: string;
+  /** Reasoning effort, e.g. "high". Left to the model's default when omitted. */
+  effort?: string;
 }
 
 const DEFAULTS: PolarisConfig = { provider: 'mock' };
@@ -41,12 +43,8 @@ export async function saveConfig(config: PolarisConfig): Promise<string> {
   await mkdir(dirname(path), { recursive: true });
   const stored: PolarisConfig = { provider: config.provider };
   if (config.model) stored.model = config.model;
-  await writeFile(
-    path,
-    `${JSON.stringify(stored, null, 2)}
-`,
-    'utf8',
-  );
+  if (config.effort) stored.effort = config.effort;
+  await writeFile(path, `${JSON.stringify(stored, null, 2)}\n`, 'utf8');
   debug('config', 'saved', path);
   return path;
 }

@@ -30,6 +30,7 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
             `  cwd       ${shortenPath(state.cwd)}`,
             `  provider  ${state.provider}`,
             `  model     ${state.model}`,
+            `  effort    ${state.effort ?? 'default'}`,
             `  tools     ${state.access?.mode ?? 'none'}`,
             `  turns     ${state.turns}`,
             `  session   ${state.status === 'error' ? 'error' : 'active'}`,
@@ -92,13 +93,33 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       },
     },
     {
+      name: 'effort',
+      summary: 'Reasoning effort: /effort [level]',
+      run: async (context, args) => {
+        const levels = await context.app.listEfforts();
+        if (!levels || levels.length === 0) {
+          context.app.notice(
+            `${context.app.state.provider} does not let the reasoning effort be chosen for ${context.app.state.model}.`,
+          );
+          return;
+        }
+        const chosen = await pick(context, args[0], 'Select effort', levels, 'effort');
+        if (!chosen || chosen === context.app.state.effort) return;
+        await context.app.setEffort(chosen);
+      },
+    },
+    {
       name: 'config',
       summary: 'Show or save configuration: /config [save]',
       run: async ({ app }, args) => {
         if (args[0] === 'save') {
           const state = app.state;
-          const path = await saveConfig({ provider: state.provider, model: state.model });
-          app.notice(`Saved provider and model to ${shortenPath(path)}.`);
+          const path = await saveConfig({
+            provider: state.provider,
+            model: state.model,
+            ...(state.effort ? { effort: state.effort } : {}),
+          });
+          app.notice(`Saved provider, model and effort to ${shortenPath(path)}.`);
           return;
         }
         const config = app.config;
@@ -107,7 +128,8 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
             `  file      ${shortenPath(configPath())}`,
             `  provider  ${config.provider}`,
             `  model     ${config.model ?? '(provider default)'}`,
-            '  /config save writes the session’s provider and model there.',
+            `  effort    ${config.effort ?? '(model default)'}`,
+            '  /config save writes the session’s provider, model and effort there.',
           ].join('\n'),
         );
       },
@@ -149,7 +171,13 @@ async function pick(
     return null;
   }
   // A cancelled picker changes nothing and says nothing.
-  return context.select(title, options);
+  const current =
+    {
+      provider: context.app.state.provider,
+      model: context.app.state.model,
+      effort: context.app.state.effort,
+    }[what] ?? null;
+  return context.select(title, options, current);
 }
 
 export function createRegistry(registry: CommandRegistry): CommandRegistry {

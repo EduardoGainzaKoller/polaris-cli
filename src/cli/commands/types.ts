@@ -5,7 +5,7 @@ export interface CommandContext {
   /** False for UIs with no picker (a pipe, a future non-interactive renderer). */
   readonly canSelect: boolean;
   /** Ask the user to choose; null when they cancelled. */
-  select(title: string, options: string[]): Promise<string | null>;
+  select(title: string, options: string[], current?: string | null): Promise<string | null>;
   /** Wipe the visible scrollback; session state is untouched. */
   clearScreen(): void;
   /** Ask the UI to shut down after this command finishes. */

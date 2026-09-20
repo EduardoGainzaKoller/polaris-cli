@@ -214,16 +214,18 @@ test('tools render as one compact line plus their outcome, grouped together', ()
     60,
   );
   assert.deepEqual(
-    lines.map((line) => line.text),
+    lines.map((line) => [line.kind, line.label ?? '', line.text, line.aside ?? '']),
     [
-      'You',
-      'Analiza',
-      '',
-      '● Glob **/*.ts',
-      '  31 files',
-      '◌ Read package.json',
-      '× Read ../x',
-      '  Path is outside the workspace.',
+      ['user', '', '', ''],
+      ['user', '', 'Analiza', ''],
+      ['user', '', '', ''],
+      ['blank', '', '', ''],
+      // A short outcome sits beside the row…
+      ['tool', 'Glob', '**/*.ts', '31 files'],
+      ['tool', 'Read', 'package.json', ''],
+      // …an error goes on its own line, so it is never cut.
+      ['tool', 'Read', '../x', ''],
+      ['detail', '', 'Path is outside the workspace.', ''],
     ],
   );
 });
