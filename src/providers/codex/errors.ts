@@ -46,3 +46,18 @@ export function turnFailed(detail?: string): PolarisError {
   if (detail && /unauthor|not logged in|sign in|401/i.test(detail)) return notAuthenticated();
   return new PolarisError('Codex turn failed.', { cause: detail });
 }
+
+/**
+ * An administrator restricted this Codex install. Polaris reports it and stops
+ * rather than retrying with a value it is not allowed to use — working around
+ * a managed policy is exactly what it must not do.
+ */
+export function adminRestricted(
+  what: string,
+  wanted: string,
+  allowed: readonly string[],
+): PolarisError {
+  return new PolarisError(
+    `Codex is managed here and does not allow the ${what} "${wanted}". Allowed: ${allowed.join(', ')}.`,
+  );
+}

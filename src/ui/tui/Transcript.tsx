@@ -6,7 +6,8 @@ const TOOL_ICON: Record<TranscriptLine['state'], string> = {
   streaming: '',
   complete: '✓',
   error: '✗',
-  cancelled: '◌',
+  // A refused call: an outline, not a cross. Nothing went wrong.
+  cancelled: '○',
 };
 
 /**
@@ -69,6 +70,13 @@ function Row({ line, spinner }: { line: TranscriptLine; spinner: string }) {
       return (
         <Text color={line.state === 'error' ? palette.error : palette.subtle}>
           {`  ${line.text}`}
+        </Text>
+      );
+
+    case 'output':
+      return (
+        <Text color={palette.subtle} wrap="truncate-end">
+          {`  ${line.text || ' '}`}
         </Text>
       );
 

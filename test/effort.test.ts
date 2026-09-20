@@ -8,13 +8,15 @@ import { PolarisApp } from '../src/core/app.ts';
 import { type ClaudeRun, createClaudeProvider } from '../src/providers/claude/index.ts';
 import { mockProvider } from '../src/providers/mock/index.ts';
 import { type ModelEvent, registerProvider } from '../src/providers/provider.ts';
+import { PERMISSION_PROFILES, TEST_ACCESS, testSession } from './helpers.ts';
 
 registerProvider(mockProvider);
 registerProvider({
   id: 'no-effort',
-  access: { mode: 'read-only', runtime: 'Test runtime', tools: [] },
+  supports: PERMISSION_PROFILES,
   async createSession() {
     return {
+      access: TEST_ACCESS,
       model: 'plain-1',
       async *send(): AsyncIterable<ModelEvent> {
         yield { type: 'text-delta', text: 'ok' };
@@ -151,7 +153,9 @@ test('Claude applies a new effort to a running session through the runtime flags
     };
   };
 
-  const session = await createClaudeProvider(run).createSession({ cwd: '/work', effort: 'low' });
+  const session = await createClaudeProvider(run).createSession(
+    testSession('/work', { effort: 'low' }),
+  );
   assert.equal(session.effort, 'low');
   for await (const _ of session.send('hola')) {
     // drain

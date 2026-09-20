@@ -13,7 +13,14 @@ export function toPolarisError(error: unknown): PolarisError {
 export function describeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
-  if (/not logged in|invalid api key|authentication|unauthorized|401/i.test(message)) {
+  // `authenticat` on purpose: the runtime says "authentication failed" in some
+  // places and "Failed to authenticate" in others, and an expired OAuth session
+  // is the most common of the two — reporting it as a generic turn failure
+  // sends people looking for a bug that is not there.
+  if (/expired|refresh/i.test(message) && /oauth|session|token/i.test(message)) {
+    return 'Claude sign-in has expired — run `claude` and sign in again, or set ANTHROPIC_API_KEY.';
+  }
+  if (/not logged in|invalid api key|authenticat|unauthorized|401/i.test(message)) {
     return 'Claude is not authenticated — set ANTHROPIC_API_KEY (see README) and try again.';
   }
   if (/enoent|spawn|could not find|not found.*claude|executable/i.test(message)) {
@@ -31,7 +38,7 @@ export function describeError(error: unknown): string {
 /** A turn that ended with `is_error` never carries a usable answer. */
 export function turnFailure(subtype: string, detail?: string): PolarisError {
   const message =
-    detail && /not logged in|invalid api key|authentication|401/i.test(detail)
+    detail && /not logged in|invalid api key|authenticat|401|oauth/i.test(detail)
       ? describeError(new Error(detail))
       : subtype === 'error_max_turns'
         ? 'Claude stopped: the turn limit was reached.'

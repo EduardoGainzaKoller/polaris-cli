@@ -16,6 +16,7 @@ import {
 } from '../layout.ts';
 import { shortenPath } from '../output.ts';
 import { palette } from '../theme.ts';
+import { Approval } from './Approval.tsx';
 import { Composer } from './Composer.tsx';
 import { Home } from './Home.tsx';
 import { Selector } from './Selector.tsx';
@@ -23,6 +24,12 @@ import { useSpinner } from './Spinner.tsx';
 import { Transcript } from './Transcript.tsx';
 
 const HEADER_HEIGHT = 2;
+/** Rows an approval card needs before any diff: borders, title, target, actions. */
+const APPROVAL_CHROME = 8;
+/** Diff rows the card shows at most, however tall the terminal is. */
+const MAX_CARD_DIFF_ROWS = 16;
+/** The transcript never shrinks below this, even with a card open. */
+const MIN_TRANSCRIPT_ROWS = 3;
 const FOOTER_HEIGHT = 1;
 /** Space between the transcript and the composer. */
 const GAP = 1;
@@ -72,14 +79,22 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
     [registry],
   );
 
-  const home = state.messages.length === 0 && pending === null;
+  const approval = state.approval;
+  const home = state.messages.length === 0 && pending === null && approval === null;
   const bodyWidth = Math.max(20, size.columns - 6);
   const lines = useMemo(
     () => transcriptLines(state.messages, bodyWidth),
     [state.messages, bodyWidth],
   );
 
-  const available = Math.max(3, size.rows - HEADER_HEIGHT - FOOTER_HEIGHT - GAP - composerHeight);
+  // The card's rows come out of the transcript's, so the whole screen still
+  // fits: everything else is fixed height, and the transcript is the only part
+  // that can give. Clipping the card instead would hide what is being agreed to.
+  const chrome = HEADER_HEIGHT + FOOTER_HEIGHT + GAP + composerHeight;
+  const budget = Math.max(0, size.rows - chrome - MIN_TRANSCRIPT_ROWS);
+  const diffRows = approval ? diffRowsFor(approval, budget) : 0;
+  const approvalHeight = approval ? APPROVAL_CHROME + (approval.facts?.length ?? 0) + diffRows : 0;
+  const available = Math.max(MIN_TRANSCRIPT_ROWS, size.rows - chrome - approvalHeight);
   const limit = maxScroll(lines.length, available);
   const offset = clamp(scroll, 0, limit);
   // While scrolled back, one row shows how far below the latest output is.
@@ -107,6 +122,12 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
       const command = registry.get(parsed.name);
       if (!command) {
         app.notice(`Unknown command /${parsed.name} — try /help`, 'error');
+        return;
+      }
+      // Switching provider, model, effort or profile replaces the session the
+      // pending request belongs to, which would strand it.
+      if (command.blockedByApproval && app.state.approval) {
+        app.notice('Finish or deny the pending approval first.', 'error');
         return;
       }
       setScroll(0);
@@ -137,6 +158,9 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
   useInput((input, key) => {
     const mouse = parseMouse(input);
     if (mouse.isMouse) return scrollBy(mouse.scroll);
+    // While an approval is open the card has the keyboard, so no other binding
+    // can be mistaken for an answer to it.
+    if (approval) return;
     if (key.pageUp) return scrollBy(transcriptHeight - 1);
     if (key.pageDown) return scrollBy(-(transcriptHeight - 1));
     if ((key.shift || key.ctrl) && key.upArrow) return scrollBy(1);
@@ -147,7 +171,7 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
   const composer = (
     <Composer
       width={home ? Math.min(size.columns - 2, 88) : size.columns - 2}
-      isActive={pending === null}
+      isActive={pending === null && approval === null}
       busy={state.busy}
       commands={commands}
       history={history}
@@ -215,7 +239,7 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
           </Box>
         ) : home ? (
           <Box flexDirection="column" alignItems="center">
-            <Home width={size.columns} />
+            <Home width={size.columns} permissions={state.permissions} />
           </Box>
         ) : (
           <Box flexDirection="column" paddingX={1}>
@@ -225,6 +249,24 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
                 <Text color={palette.accent}>
                   {`↓ ${offset} more ${offset === 1 ? 'line' : 'lines'} · esc to jump to latest`}
                 </Text>
+              </Box>
+            ) : null}
+            {/* The card sits inside the body and below the transcript, which
+                already gave up the rows for it. Outside, a short terminal
+                would clip the card itself — the one thing that must stay
+                readable, since it is what is being agreed to. */}
+            {approval ? (
+              <Box justifyContent="center" marginTop={1} flexShrink={0}>
+                <Approval
+                  request={approval}
+                  width={Math.min(76, size.columns - 6)}
+                  maxDiffRows={diffRows}
+                  onDecide={(decision) => app.resolveApproval(decision)}
+                  onCancelTurn={() => {
+                    app.resolveApproval('deny');
+                    app.cancel();
+                  }}
+                />
               </Box>
             ) : null}
           </Box>
@@ -247,11 +289,27 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
         <Text color={palette.subtle}>{`   ${where}`}</Text>
         <Box flexGrow={1} />
         <Text color={palette.subtle} wrap="truncate-end">
-          {footerHints(hintsWidth, state.busy)}
+          {footerHints(hintsWidth, state.busy, approval !== null)}
         </Text>
       </Box>
     </Box>
   );
+}
+
+/**
+ * How many diff rows the card can show: as many as fit, never so many that
+ * the transcript disappears, and never more than a screenful — a diff cut to
+ * nothing is worse than no diff at all, because it looks like there was no
+ * change to see.
+ */
+function diffRowsFor(
+  approval: { diff?: string; facts?: readonly string[] },
+  budget: number,
+): number {
+  if (!approval.diff) return 0;
+  const wanted = approval.diff.split('\n').length;
+  const room = budget - APPROVAL_CHROME - (approval.facts?.length ?? 0);
+  return Math.max(0, Math.min(wanted, room, MAX_CARD_DIFF_ROWS));
 }
 
 function terminalSize(): { columns: number; rows: number } {

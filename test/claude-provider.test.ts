@@ -7,7 +7,9 @@ import {
   claudeProvider,
   createClaudeProvider,
 } from '../src/providers/claude/index.ts';
+import { permissionBridge } from '../src/providers/claude/tools.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
+import { autoGate, testSession } from './helpers.ts';
 
 const MODEL = 'claude-sonnet-5';
 
@@ -112,7 +114,7 @@ test('the claude provider is registered under its own id', () => {
 
 test('runtime messages are translated into Polaris events', async () => {
   const { run } = fakeClaude({ replies: [['Hola', ' Eduardo']] });
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
 
   const events = await collect(session.send('Me llamo Eduardo'));
   assert.deepEqual(
@@ -125,7 +127,7 @@ test('runtime messages are translated into Polaris events', async () => {
 
 test('the model reported by the runtime reaches /status', async () => {
   const { run, seen } = fakeClaude();
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
 
   assert.equal(session.model, 'default', 'before the first turn there is nothing to report');
   await collect(session.send('hola'));
@@ -137,7 +139,7 @@ test('the model reported by the runtime reaches /status', async () => {
 test('a configured model is passed through to the runtime', async () => {
   const { run, seen } = fakeClaude();
   const session = await createClaudeProvider(run).createSession({
-    cwd: '/tmp',
+    ...testSession('/tmp'),
     model: 'claude-opus-5',
   });
   assert.equal(session.model, 'claude-opus-5');
@@ -146,17 +148,18 @@ test('a configured model is passed through to the runtime', async () => {
   await session.close();
 });
 
-test('only read-only tools exist, locked by deny rules, dontAsk and a hook', async () => {
+test('under read-only only the three inspection tools reach the runtime', async () => {
   const { run, seen } = fakeClaude();
-  const session = await createClaudeProvider(run).createSession({ cwd: '/work' });
+  const session = await createClaudeProvider(run).createSession(
+    testSession('/work', { permissions: 'read-only' }),
+  );
   await collect(session.send('hola'));
 
   assert.deepEqual(seen.options?.tools, ['Read', 'Glob', 'Grep']);
-  for (const denied of ['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch', 'WebSearch']) {
+  for (const denied of ['NotebookEdit', 'WebFetch', 'WebSearch']) {
     assert.ok(seen.options?.disallowedTools?.includes(denied), `${denied} is denied`);
   }
   assert.ok(seen.options?.disallowedTools?.includes('mcp__*'), 'no MCP tools');
-  assert.equal(seen.options?.permissionMode, 'dontAsk');
   assert.equal(seen.options?.hooks?.PreToolUse?.length, 1);
   assert.deepEqual(seen.options?.settingSources, [], 'no CLAUDE.md, settings, skills or plugins');
   assert.equal(seen.options?.cwd, '/work');
@@ -164,9 +167,57 @@ test('only read-only tools exist, locked by deny rules, dontAsk and a hook', asy
   await session.close();
 });
 
+test('a mutating profile adds the runtime tools and the official permission callback', async () => {
+  const { run, seen } = fakeClaude();
+  const session = await createClaudeProvider(run).createSession(
+    testSession('/work', { permissions: 'ask' }),
+  );
+  await collect(session.send('hola'));
+
+  assert.deepEqual(seen.options?.tools, ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash']);
+  // `default` is what routes prompts to canUseTool. `dontAsk` would deny them
+  // and `bypassPermissions` would take the decision away from the user.
+  assert.equal(seen.options?.permissionMode, 'default');
+  assert.equal(typeof seen.options?.canUseTool, 'function');
+  assert.notEqual(seen.options?.permissionMode, 'bypassPermissions');
+  assert.equal(seen.options?.allowDangerouslySkipPermissions, undefined);
+  await session.close();
+});
+
+test('the permission callback asks the gate and answers in the runtime vocabulary', async () => {
+  const allowed = autoGate('ask', 'allow');
+  const refused = autoGate('ask', 'deny');
+
+  const yes = permissionBridge('/work', allowed.gate);
+  const no = permissionBridge('/work', refused.gate);
+  const options = {
+    signal: new AbortController().signal,
+    toolUseID: 't1',
+    requestId: 'r1',
+  } as never;
+
+  assert.deepEqual(await yes('Read', { file_path: '/work/a.ts' }, options), {
+    behavior: 'allow',
+    updatedInput: { file_path: '/work/a.ts' },
+  });
+  assert.deepEqual(allowed.asked, [], 'a read is never an ask');
+
+  const run = await yes('Bash', { command: 'npm test' }, options);
+  assert.equal(run.behavior, 'allow');
+  assert.deepEqual(allowed.asked, ['Run command npm test']);
+
+  const denied = await no('Bash', { command: 'npm test' }, options);
+  assert.equal(denied.behavior, 'deny');
+  assert.match((denied as { message: string }).message, /denied by the user/i);
+
+  // A tool Polaris does not map is refused, never guessed at.
+  const unknown = await yes('WebFetch', {}, options);
+  assert.equal(unknown.behavior, 'deny');
+});
+
 test('the runtime keeps the conversation: one session, many turns', async () => {
   const { run, seen } = fakeClaude({ replies: [['Hola Eduardo'], ['Te llamas Eduardo']] });
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
 
   assert.equal(textOf(await collect(session.send('Me llamo Eduardo'))), 'Hola Eduardo');
   assert.equal(textOf(await collect(session.send('Como me llamo'))), 'Te llamas Eduardo');
@@ -181,7 +232,7 @@ test('Ctrl+C interrupts the turn and the session survives it', async () => {
     replies: [['Spring ', 'Boot ', 'es ', 'un ', 'framework'], ['Si']],
     delayMs: 15,
   });
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
   const controller = new AbortController();
 
   let seenText = '';
@@ -204,7 +255,7 @@ test('Ctrl+C interrupts the turn and the session survives it', async () => {
 
 test('an already aborted signal never reaches the runtime', async () => {
   const { run, seen } = fakeClaude();
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
   await assert.rejects(() => collect(session.send('hola', AbortSignal.abort())));
   assert.equal(seen.starts, 0);
 });
@@ -213,7 +264,7 @@ test('a failed turn is reported cleanly, without SDK internals', async () => {
   const { run } = fakeClaude({
     failure: { subtype: 'error_during_execution', is_error: true, result: 'Invalid API key' },
   });
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
 
   await assert.rejects(
     () => collect(session.send('hola')),
@@ -229,7 +280,7 @@ test('a failed turn is reported cleanly, without SDK internals', async () => {
 
 test('a runtime that cannot start produces a one-line explanation', async () => {
   const { run } = fakeClaude({ startError: new Error('spawn claude ENOENT') });
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
 
   await assert.rejects(
     () => collect(session.send('hola')),
@@ -243,7 +294,7 @@ test('a runtime that cannot start produces a one-line explanation', async () => 
 
 test('closing the session shuts the runtime down', async () => {
   const { run, seen } = fakeClaude();
-  const session = await createClaudeProvider(run).createSession({ cwd: '/tmp' });
+  const session = await createClaudeProvider(run).createSession(testSession('/tmp'));
   await collect(session.send('hola'));
   await session.close();
   assert.equal(seen.closed, true);

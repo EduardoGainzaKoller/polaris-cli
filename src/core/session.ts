@@ -1,4 +1,6 @@
 import type { PolarisConfig } from '../config/config.ts';
+import type { PermissionGate } from '../permissions/gate.ts';
+import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
 import {
   getProvider,
   type ModelEvent,
@@ -18,6 +20,8 @@ export interface Turn {
 export interface SessionOptions {
   readonly cwd: string;
   readonly config: PolarisConfig;
+  /** The one gate every mutation in this session is authorised through. */
+  readonly gate: PermissionGate;
 }
 
 /**
@@ -32,10 +36,16 @@ export class Session {
   #history: Turn[] = [];
   #model: ModelSession | null = null;
   #access: ToolAccess | null = null;
+  readonly #gate: PermissionGate;
 
   constructor(options: SessionOptions) {
     this.cwd = options.cwd;
     this.config = options.config;
+    this.#gate = options.gate;
+  }
+
+  get permissions(): PermissionProfile {
+    return this.config.permissions ?? DEFAULT_PROFILE;
   }
 
   get history(): readonly Turn[] {
@@ -64,12 +74,22 @@ export class Session {
     if (!provider) {
       throw new PolarisError(`Unknown provider "${this.config.provider}"`);
     }
+    // A provider that cannot honour the profile says so rather than accepting
+    // it and doing something else — misreporting a permission is worse than
+    // refusing to switch.
+    if (!provider.supports.includes(this.permissions)) {
+      throw new PolarisError(
+        `${provider.id} cannot enforce the "${this.permissions}" permission profile.`,
+      );
+    }
     this.#model = await provider.createSession({
       cwd: this.cwd,
+      permissions: this.permissions,
+      gate: this.#gate,
       ...(this.config.model ? { model: this.config.model } : {}),
       ...(this.config.effort ? { effort: this.config.effort } : {}),
     });
-    this.#access = provider.access;
+    this.#access = this.#model.access;
     debug('session', 'started with', provider.id);
   }
 

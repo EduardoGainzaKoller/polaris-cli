@@ -4,7 +4,7 @@ import { shortenPath } from './output.ts';
 /** Pure layout maths — no ANSI, no Ink — so it can be unit-tested directly. */
 
 export interface TranscriptLine {
-  readonly kind: 'blank' | 'user' | 'text' | 'meta' | 'tool' | 'detail' | 'notice';
+  readonly kind: 'blank' | 'user' | 'text' | 'meta' | 'tool' | 'detail' | 'output' | 'notice';
   readonly role: UiMessage['role'];
   readonly state: UiMessage['state'];
   readonly text: string;
@@ -13,6 +13,9 @@ export interface TranscriptLine {
   /** Short outcome shown at the right edge of a tool row. */
   readonly aside?: string;
 }
+
+/** Live command output rows kept under a running tool. */
+const OUTPUT_ROWS = 6;
 
 /** Wraps on word boundaries, keeps explicit newlines, never loses characters. */
 export function wrapText(text: string, width: number): string[] {
@@ -67,8 +70,8 @@ export function transcriptLines(messages: readonly UiMessage[], width: number): 
     previous = message;
 
     if (role === 'tool' && message.tool) {
-      const { name, target, detail } = message.tool;
-      const outcome = state === 'cancelled' ? 'cancelled' : detail;
+      const { name, target, detail, denied, output } = message.tool;
+      const outcome = denied ? 'denied' : state === 'cancelled' ? 'cancelled' : detail;
       // A short success fits beside the row; errors and long outcomes go below.
       const beside = state === 'complete' && outcome && outcome.length <= 24 ? outcome : undefined;
       const room = Math.max(8, width - name.length - 4 - (beside ? beside.length + 2 : 0));
@@ -82,6 +85,13 @@ export function transcriptLines(messages: readonly UiMessage[], width: number): 
         ...(beside ? { aside: beside } : {}),
       });
       for (const text of rest) push({ kind: 'detail', role, state, text });
+      // A command's own output while it runs, so a long test suite is not a
+      // blank screen. It is replaced by the outcome once the tool finishes.
+      if (output && state === 'streaming') {
+        for (const line of output.split('\n').slice(-OUTPUT_ROWS)) {
+          push({ kind: 'output', role, state, text: line.slice(0, Math.max(8, width - 4)) });
+        }
+      }
       if (outcome && !beside) {
         for (const text of wrapText(outcome, Math.max(8, width - 4))) {
           push({ kind: 'detail', role, state, text });
@@ -137,7 +147,9 @@ const STATUS_LABELS: Record<AppStatus, string> = {
   reading: 'reading',
   searching: 'searching',
   working: 'working',
+  running: 'running command',
   switching: 'switching',
+  approving: 'approval required',
   cancelled: 'cancelled',
   error: 'error',
 };
@@ -154,8 +166,7 @@ export function statusSegments(state: AppState, width: number): { left: string; 
   const where = shortenPath(state.cwd);
   const model = state.model;
   const full = `${state.provider} · ${model}`;
-  const mode = state.access ? `${state.access.mode} · ` : '';
-  const status = `${mode}${statusLabel(state.status)}`;
+  const status = `${state.permissions} · ${statusLabel(state.status)}`;
 
   if (width >= full.length + where.length + status.length + 8) {
     return { left: `${full}    ${where}`, right: status };
@@ -210,10 +221,12 @@ export function historyStep(
 }
 
 /** Keyboard hints for the footer, dropped from the end as the terminal narrows. */
-export function footerHints(width: number, busy: boolean): string {
-  const hints = busy
-    ? ['ctrl+c cancel', 'pgup/pgdn scroll', '/help']
-    : ['↑↓ history', 'pgup/pgdn scroll', '/ commands', 'ctrl+c exit'];
+export function footerHints(width: number, busy: boolean, approving = false): string {
+  const hints = approving
+    ? ['enter allow', 'd deny', 'ctrl+c cancel turn']
+    : busy
+      ? ['ctrl+c cancel', 'pgup/pgdn scroll', '/help']
+      : ['↑↓ history', 'pgup/pgdn scroll', '/ commands', 'ctrl+c exit'];
   const shown: string[] = [];
   let used = 0;
   for (const hint of hints) {

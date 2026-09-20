@@ -12,6 +12,7 @@ export interface GlobInput {
 export const globFiles: ToolDefinition<GlobInput> = {
   name: 'glob_files',
   title: 'Glob',
+  capability: 'read',
   description:
     'List workspace files matching a glob pattern such as "**/*.ts" or "src/**/*.java". ' +
     'Paths are relative to the workspace root. .git, node_modules and anything in the root ' +

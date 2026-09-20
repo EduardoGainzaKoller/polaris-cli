@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { MAX_FILE_BYTES, MAX_GLOB_RESULTS, MAX_GREP_RESULTS } from '../src/tools/limits.ts';
-import { createReadOnlyRegistry, type ToolCallResult } from '../src/tools/registry.ts';
+import { createRegistry, type ToolCallResult } from '../src/tools/registry.ts';
 import { resolveInWorkspace } from '../src/tools/workspace.ts';
 
-const registry = createReadOnlyRegistry();
+const registry = createRegistry('read-only');
 let workspace: string;
 let outside: string;
 

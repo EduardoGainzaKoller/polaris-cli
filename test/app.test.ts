@@ -4,12 +4,14 @@ import { type AppState, PolarisApp } from '../src/core/app.ts';
 import { mockProvider } from '../src/providers/mock/index.ts';
 import type { ModelEvent, ModelProvider } from '../src/providers/provider.ts';
 import { registerProvider } from '../src/providers/provider.ts';
+import { PERMISSION_PROFILES, TEST_ACCESS } from './helpers.ts';
 
 registerProvider(mockProvider);
 
 /** A provider that never starts, to exercise a failed switch. */
 registerProvider({
   id: 'broken',
+  supports: PERMISSION_PROFILES,
   async createSession() {
     throw new Error('runtime unavailable');
   },
@@ -18,8 +20,10 @@ registerProvider({
 /** A provider that streams slowly enough to be cancelled. */
 registerProvider({
   id: 'slow',
+  supports: PERMISSION_PROFILES,
   async createSession() {
     return {
+      access: TEST_ACCESS,
       model: 'slow-1',
       async *send(_input, signal): AsyncIterable<ModelEvent> {
         yield { type: 'message-start' };
@@ -88,8 +92,10 @@ test('cancelling marks the partial answer and leaves the app usable', async () =
 test('a failed turn becomes an error notice, not a crash', async () => {
   registerProvider({
     id: 'exploding',
+    supports: PERMISSION_PROFILES,
     async createSession() {
       return {
+        access: TEST_ACCESS,
         model: 'boom-1',
         send(): AsyncIterable<ModelEvent> {
           return {

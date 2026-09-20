@@ -16,6 +16,7 @@ export interface GrepInput {
 export const grepText: ToolDefinition<GrepInput> = {
   name: 'grep_text',
   title: 'Grep',
+  capability: 'read',
   description:
     'Search file contents in the workspace. Literal text by default; set regex to true for a ' +
     'JavaScript regular expression. Optionally restrict files with a glob. Returns ' +

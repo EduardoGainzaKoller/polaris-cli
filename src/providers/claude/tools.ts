@@ -1,24 +1,37 @@
 import { isAbsolute } from 'node:path';
-import type { HookCallback, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, HookCallback, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionGate } from '../../permissions/gate.ts';
+import type { Capability, PermissionProfile } from '../../permissions/policy.ts';
+import { isAvailable } from '../../permissions/policy.ts';
+import { truncateDiff, unifiedDiff } from '../../tools/diff.ts';
 import { resolveInWorkspace } from '../../tools/workspace.ts';
+import { readIfExists } from '../../tools/write-file.ts';
 import type { ModelEvent, ToolAccess } from '../provider.ts';
 
 /**
- * The Claude runtime runs its own agent loop and its own tools; Polaris decides
- * which ones exist and translates what they do into the shared event protocol.
+ * The Claude runtime runs its own agent loop and its own tools. Polaris decides
+ * which ones exist, maps each to a Polaris capability, and lets the runtime's
+ * own permission callback ask the user — there is no second agent loop and no
+ * second set of rules here.
  */
 
-/** The only built-in tools the runtime is given. */
-export const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'] as const;
+/** Runtime tool → what it does to the world. Anything unlisted does not exist. */
+const CAPABILITIES: Record<string, Capability> = {
+  Read: 'read',
+  Glob: 'read',
+  Grep: 'read',
+  Write: 'write',
+  Edit: 'edit',
+  Bash: 'command',
+};
 
 /**
- * Removed from the request outright, so the model never even sees them. The
- * `tools` list above already excludes them; this is the second lock.
+ * Removed from the request outright, so the model never sees them. `tools`
+ * already excludes everything not in `CAPABILITIES`; this is the second lock,
+ * and it names the tools that would step outside v0.6's scope even under
+ * workspace-write.
  */
 export const DENIED_TOOLS = [
-  'Bash',
-  'Write',
-  'Edit',
   'MultiEdit',
   'NotebookEdit',
   'WebFetch',
@@ -28,19 +41,119 @@ export const DENIED_TOOLS = [
   'mcp__*',
 ];
 
-export const CLAUDE_TOOL_ACCESS: ToolAccess = {
-  mode: 'read-only',
-  runtime: 'Claude runtime',
-  tools: [...READ_ONLY_TOOLS],
-};
+/** The runtime tools a profile makes available. */
+export function toolsFor(profile: PermissionProfile): string[] {
+  return Object.entries(CAPABILITIES)
+    .filter(([, capability]) => isAvailable(profile, capability))
+    .map(([name]) => name);
+}
+
+export function claudeAccess(profile: PermissionProfile): ToolAccess {
+  return { mode: profile, runtime: 'Claude runtime', tools: toolsFor(profile) };
+}
+
+/**
+ * The runtime's official permission callback, and the only place a Claude tool
+ * call is authorised. It hands the call to the same gate the Polaris tools
+ * use, so the user sees one approval card whatever the provider is.
+ *
+ * The gate answers `allow` on its own for read-only calls and for edits under
+ * workspace-write, so the user is asked exactly as often as the profile says.
+ */
+export function permissionBridge(cwd: string, gate: PermissionGate): CanUseTool {
+  return async (toolName, input, { signal }) => {
+    const capability = CAPABILITIES[toolName];
+    if (!capability) {
+      return { behavior: 'deny', message: `${toolName} is not available in Polaris.` };
+    }
+    const verdict = await gate.authorize(capability, await describe(toolName, input, cwd), signal);
+    return verdict.allowed
+      ? { behavior: 'allow', updatedInput: input }
+      : { behavior: 'deny', message: verdict.reason };
+  };
+}
+
+/** Builds the approval card from the runtime's own tool input. */
+async function describe(
+  toolName: string,
+  input: Record<string, unknown>,
+  cwd: string,
+): Promise<{ title: string; target: string; facts?: string[]; diff?: string }> {
+  const path = typeof input.file_path === 'string' ? input.file_path : '';
+  const shown = path ? relativeTo(cwd, path) : '';
+
+  if (toolName === 'Bash') {
+    const command = typeof input.command === 'string' ? input.command : '';
+    return {
+      title: 'Run command',
+      target: command,
+      facts: [`cwd: ${cwd}`, ...(typeof input.description === 'string' ? [input.description] : [])],
+    };
+  }
+  if (toolName === 'Write') {
+    const content = typeof input.content === 'string' ? input.content : '';
+    const before = await safeRead(cwd, path);
+    const lines = content.split('\n').length;
+    return {
+      title: 'Write',
+      target: shown,
+      facts: [before === null ? `New file · ${lines} lines` : `Replaces ${shown}`],
+      diff: truncateDiff(
+        before === null
+          ? content
+              .split('\n')
+              .map((line) => `+${line}`)
+              .join('\n')
+          : unifiedDiff(shown, before, content),
+      ),
+    };
+  }
+  if (toolName === 'Edit') {
+    const before = await safeRead(cwd, path);
+    const oldText = typeof input.old_string === 'string' ? input.old_string : '';
+    const newText = typeof input.new_string === 'string' ? input.new_string : '';
+    // The diff is built from the runtime's own strings, so the card shows the
+    // change that will actually be applied rather than a paraphrase of it.
+    const after =
+      before === null
+        ? null
+        : input.replace_all === true
+          ? before.split(oldText).join(newText)
+          : before.replace(oldText, newText);
+    return {
+      title: 'Edit',
+      target: shown,
+      ...(before !== null && after !== null
+        ? { diff: truncateDiff(unifiedDiff(shown, before, after)) }
+        : {
+            diff: [
+              ...oldText.split('\n').map((line) => `-${line}`),
+              ...newText.split('\n').map((line) => `+${line}`),
+            ].join('\n'),
+          }),
+    };
+  }
+  return { title: toolName, target: shown || String(input.pattern ?? '') };
+}
+
+async function safeRead(cwd: string, path: string): Promise<string | null> {
+  if (!path) return null;
+  try {
+    return await readIfExists(await resolveInWorkspace(cwd, path));
+  } catch {
+    return null;
+  }
+}
 
 /**
  * A PreToolUse hook runs before every permission rule and its deny cannot be
  * overridden, so it is where the workspace boundary is enforced — with the same
- * symlink-aware check the Polaris tools use. Anything that is not one of the
- * three read-only tools is denied as well, whatever else the runtime allows.
+ * symlink-aware check the Polaris tools use. It is the sandbox to
+ * `permissionBridge`'s approval: the bridge decides whether to ask, this
+ * decides what is reachable at all.
  */
-export function workspaceGuard(cwd: string): HookCallback {
+export function workspaceGuard(cwd: string, profile: PermissionProfile): HookCallback {
+  const allowed = toolsFor(profile);
   return async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
 
@@ -52,8 +165,8 @@ export function workspaceGuard(cwd: string): HookCallback {
       },
     });
 
-    if (!(READ_ONLY_TOOLS as readonly string[]).includes(input.tool_name)) {
-      return deny(`${input.tool_name} is not available: Polaris is read-only.`);
+    if (!allowed.includes(input.tool_name)) {
+      return deny(`${input.tool_name} is not available under the "${profile}" permission profile.`);
     }
 
     const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
@@ -106,7 +219,7 @@ export class ClaudeToolTranslator {
       events.push({
         type: 'tool-start',
         id: block.id,
-        name,
+        name: label(name),
         target: targetOf(name, block.input, this.#cwd),
       });
     }
@@ -121,14 +234,35 @@ export class ClaudeToolTranslator {
       if (!name) continue;
       this.#started.delete(block.tool_use_id);
       const text = resultText(block.content);
-      events.push(
-        block.is_error === true
-          ? { type: 'tool-error', id: block.tool_use_id, error: firstLine(text) || 'Tool failed.' }
-          : { type: 'tool-result', id: block.tool_use_id, summary: summarize(name, text) },
-      );
+      if (block.is_error === true) {
+        const message = firstLine(text) || 'Tool failed.';
+        events.push({
+          type: 'tool-error',
+          id: block.tool_use_id,
+          error: message,
+          // A refusal reads differently from a failure, in the transcript and
+          // in the icon; the gate's own wording is what identifies it.
+          ...(isDenial(message) ? { denied: true } : {}),
+        });
+        continue;
+      }
+      events.push({
+        type: 'tool-result',
+        id: block.tool_use_id,
+        summary: summarize(name, text),
+      });
     }
     return events;
   }
+}
+
+function isDenial(message: string): boolean {
+  return /denied by the user|not permitted under|no approval surface/i.test(message);
+}
+
+/** The runtime's tool names, in Polaris's vocabulary. */
+function label(name: string): string {
+  return name === 'Bash' ? 'Run' : name;
 }
 
 type Block = Record<string, unknown> & { type?: unknown };
@@ -141,8 +275,8 @@ function blocks(content: unknown): Block[] {
 
 function targetOf(name: string, input: unknown, cwd: string): string {
   const value = (input ?? {}) as Record<string, unknown>;
-  if (name === 'Read' && typeof value.file_path === 'string')
-    return relativeTo(cwd, value.file_path);
+  if (name === 'Bash' && typeof value.command === 'string') return value.command;
+  if (typeof value.file_path === 'string') return relativeTo(cwd, value.file_path);
   if (typeof value.pattern === 'string') {
     return name === 'Grep' ? `"${value.pattern}"` : value.pattern;
   }
@@ -172,6 +306,8 @@ function summarize(name: string, text: string): string {
   if (name === 'Glob') return `${lines} ${lines === 1 ? 'file' : 'files'}`;
   if (name === 'Grep')
     return lines === 0 ? 'no matches' : `${lines} ${lines === 1 ? 'result' : 'results'}`;
+  if (name === 'Write' || name === 'Edit') return 'applied';
+  if (name === 'Bash') return `${lines} ${lines === 1 ? 'line' : 'lines'} of output`;
   return 'done';
 }
 

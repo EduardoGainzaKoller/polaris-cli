@@ -1,3 +1,4 @@
+import type { PermissionProfile } from '../../permissions/policy.ts';
 import type { ModelEvent, ToolAccess } from '../provider.ts';
 import type { JsonObject } from './app-server.ts';
 
@@ -10,13 +11,23 @@ import type { JsonObject } from './app-server.ts';
  * a raw shell command.
  */
 
-export const CODEX_TOOL_ACCESS: ToolAccess = {
-  mode: 'read-only',
-  runtime: 'Codex runtime',
-  tools: ['read-only sandbox: read, list, search'],
-};
+/**
+ * Codex is the one runtime whose commands are genuinely sandboxed by the OS,
+ * not merely approved — `sandboxed: true` says so, and nothing else claims it.
+ */
+export function codexAccess(profile: PermissionProfile): ToolAccess {
+  return {
+    mode: profile,
+    runtime: 'Codex runtime',
+    sandboxed: true,
+    tools:
+      profile === 'read-only'
+        ? ['read-only sandbox: read, list, search']
+        : ['workspace-write sandbox: read, list, search, edit, run'],
+  };
+}
 
-interface CommandAction {
+export interface CommandAction {
   type?: string;
   path?: string | null;
   query?: string | null;
@@ -55,13 +66,11 @@ export function itemCompleted(item: Item): ModelEvent {
   const id = item.id as string;
   const status = String(item.status ?? '');
 
-  if (item.type === 'fileChange') {
-    // The sandbox is read-only; a change that reached this point was refused.
-    return { type: 'tool-error', id, error: 'Writes are disabled: Polaris is read-only.' };
+  if (status === 'declined') {
+    return { type: 'tool-error', id, error: 'Declined by the user.', denied: true };
   }
-  if (status === 'declined')
-    return { type: 'tool-error', id, error: 'Declined: Polaris is read-only.' };
   if (status === 'failed') return { type: 'tool-error', id, error: failure(item) };
+  if (item.type === 'fileChange') return { type: 'tool-result', id, summary: changeSummary(item) };
 
   if (item.type === 'commandExecution') {
     const exitCode = item.exitCode;
@@ -105,6 +114,20 @@ function describe(item: Item, cwd: string): { name: string; target: string } {
   }
 }
 
+/** "+4 -1", counted from the diffs Codex reports for the item. */
+function changeSummary(item: Item): string {
+  const changes = (Array.isArray(item.changes) ? item.changes : []) as Array<{ diff?: string }>;
+  let added = 0;
+  let removed = 0;
+  for (const change of changes) {
+    for (const line of (change.diff ?? '').split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) added += 1;
+      else if (line.startsWith('-') && !line.startsWith('---')) removed += 1;
+    }
+  }
+  return `+${added} -${removed}`;
+}
+
 function commandSummary(item: Item): string {
   const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput : '';
   const lines = output.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
@@ -126,7 +149,7 @@ function commandSummary(item: Item): string {
  * wrapper — the unwrapped command it still provides is classified here. This
  * only chooses a label for the UI; the sandbox decides what may actually run.
  */
-function effectiveAction(item: Item): { action: CommandAction | undefined; more: number } {
+export function effectiveAction(item: Item): { action: CommandAction | undefined; more: number } {
   const actions = (
     Array.isArray(item.commandActions) ? item.commandActions : []
   ) as CommandAction[];

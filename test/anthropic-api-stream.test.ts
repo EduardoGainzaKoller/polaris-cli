@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { anthropicApiProvider, DEFAULT_MODEL } from '../src/providers/anthropic-api/index.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
+import { autoGate, testSession } from './helpers.ts';
 
 /**
  * Exercises the real SDK against a local server that speaks the Messages
@@ -146,7 +148,7 @@ function reset(): void {
 
 test('text deltas from the wire become Polaris text-delta events', async () => {
   reset();
-  const session = await anthropicApiProvider.createSession({ cwd: workspace });
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
 
   const events = await collect(session.send('Me llamo Eduardo'));
   assert.equal(events.at(0)?.type, 'message-start');
@@ -162,7 +164,7 @@ test('text deltas from the wire become Polaris text-delta events', async () => {
 test('the conversation is replayed, so the session is multi-turn', async () => {
   reset();
   const session = await anthropicApiProvider.createSession({
-    cwd: workspace,
+    ...testSession(workspace),
     model: 'claude-test',
   });
 
@@ -180,17 +182,97 @@ test('the conversation is replayed, so the session is multi-turn', async () => {
   await session.close();
 });
 
-test('only the three read-only Polaris tools are offered to the model', async () => {
+test('the profile decides which tools the model is even offered', async () => {
   reset();
-  const session = await anthropicApiProvider.createSession({ cwd: workspace });
-  await collect(session.send('hola'));
+  const readOnly = await anthropicApiProvider.createSession(
+    testSession(workspace, { permissions: 'read-only' }),
+  );
+  await collect(readOnly.send('hola'));
 
   const tools = requests[0]?.tools as Array<{ name: string; input_schema: unknown }>;
+  // A denied capability is not a tool the model is told not to use: it is a
+  // tool that does not exist in the request at all.
   assert.deepEqual(
     tools.map((tool) => tool.name),
     ['read_file', 'glob_files', 'grep_text'],
   );
   assert.ok(tools.every((tool) => typeof tool.input_schema === 'object'));
+  await readOnly.close();
+
+  reset();
+  const ask = await anthropicApiProvider.createSession(
+    testSession(workspace, { permissions: 'ask' }),
+  );
+  await collect(ask.send('hola'));
+  const offered = requests[0]?.tools as Array<{ name: string }>;
+  assert.deepEqual(
+    offered.map((tool) => tool.name),
+    ['read_file', 'glob_files', 'grep_text', 'write_file', 'edit_file', 'run_command'],
+  );
+  await ask.close();
+});
+
+test('a mutating tool is authorised before it runs, and its result goes back', async () => {
+  reset();
+  toolTurns = [
+    [
+      {
+        id: 'toolu_w',
+        name: 'write_file',
+        input: { path: 'created.ts', content: 'export const a = 1;\n' },
+      },
+    ],
+  ];
+  reply = ['Done.'];
+  const approved = autoGate('ask', 'allow');
+  const session = await anthropicApiProvider.createSession(
+    testSession(workspace, { permissions: 'ask', gate: approved.gate }),
+  );
+
+  const events = await collect(session.send('crea el archivo'));
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['message-start', 'tool-start', 'tool-result', 'text-delta', 'message-end'],
+  );
+  assert.deepEqual(approved.asked, ['Write created.ts']);
+  assert.equal(await readFile(join(workspace, 'created.ts'), 'utf8'), 'export const a = 1;\n');
+
+  const sent = requests[1]?.messages as Array<{ content: unknown }>;
+  const results = sent.at(-1)?.content as Array<Record<string, unknown>>;
+  assert.equal(results[0]?.tool_use_id, 'toolu_w');
+  assert.match(String(results[0]?.content), /Created created\.ts/);
+  await session.close();
+});
+
+test('a refused tool writes nothing and tells the model a person said no', async () => {
+  reset();
+  toolTurns = [
+    [
+      {
+        id: 'toolu_d',
+        name: 'write_file',
+        input: { path: 'refused.ts', content: 'nope\n' },
+      },
+    ],
+  ];
+  reply = ['Understood.'];
+  const refused = autoGate('ask', 'deny');
+  const session = await anthropicApiProvider.createSession(
+    testSession(workspace, { permissions: 'ask', gate: refused.gate }),
+  );
+
+  const events = await collect(session.send('crea el archivo'));
+  const error = events.find((event) => event.type === 'tool-error');
+  assert.ok(error, 'the refusal is reported as a tool event');
+  assert.equal((error as { denied?: boolean }).denied, true);
+  assert.equal(existsSync(join(workspace, 'refused.ts')), false);
+
+  // The model is told it was refused, in the same turn, so it can offer
+  // something else instead of asking for the identical thing again.
+  const sent = requests[1]?.messages as Array<{ content: unknown }>;
+  const results = sent.at(-1)?.content as Array<Record<string, unknown>>;
+  assert.match(String(results[0]?.content), /denied by the user/i);
+  assert.equal(results[0]?.is_error, true);
   await session.close();
 });
 
@@ -198,7 +280,7 @@ test('a tool call runs in Polaris, is reported as events, and its result goes ba
   reset();
   toolTurns = [[{ id: 'toolu_1', name: 'read_file', input: { path: 'package.json' } }]];
   reply = ['The package is demo.'];
-  const session = await anthropicApiProvider.createSession({ cwd: workspace });
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
 
   const events = await collect(session.send('What is the package name?'));
   assert.deepEqual(
@@ -226,7 +308,7 @@ test('a failing tool is an error the model reads, not a failed turn', async () =
   reset();
   toolTurns = [[{ id: 'toolu_2', name: 'read_file', input: { path: '../../etc/passwd' } }]];
   reply = ['I cannot read outside the workspace.'];
-  const session = await anthropicApiProvider.createSession({ cwd: workspace });
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
 
   const events = await collect(session.send('Read /etc/passwd'));
   assert.deepEqual(
@@ -249,7 +331,7 @@ test('parallel tool calls all come back in one user message', async () => {
     ],
   ];
   reply = ['Done.'];
-  const session = await anthropicApiProvider.createSession({ cwd: workspace });
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
 
   const events = await collect(session.send('Look around'));
   assert.equal(events.filter((e) => e.type === 'tool-start').length, 2);
@@ -267,7 +349,7 @@ test('cancelling mid-answer keeps the partial turn and leaves the session usable
   reset();
   reply = ['Spring ', 'Boot ', 'es ', 'un ', 'framework'];
   delayMs = 20;
-  const session = await anthropicApiProvider.createSession({ cwd: workspace });
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
   const controller = new AbortController();
 
   let seen = '';
@@ -300,7 +382,7 @@ test('cancelling mid-answer keeps the partial turn and leaves the session usable
 test('cancelling while a tool runs leaves a history the API still accepts', async () => {
   reset();
   toolTurns = [[{ id: 'toolu_c', name: 'grep_text', input: { pattern: 'demo' } }]];
-  const session = await anthropicApiProvider.createSession({ cwd: workspace });
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
   const controller = new AbortController();
 
   await assert.rejects(async () => {

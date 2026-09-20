@@ -76,12 +76,12 @@ test('failures, declines and non-zero exits become tool errors', () => {
   });
 });
 
-test('a file change is always reported as refused', () => {
+test('an applied file change reports the paths and how much moved', () => {
   const change = {
     type: 'fileChange',
     id: 'patch_1',
     status: 'completed',
-    changes: [{ path: FILE }],
+    changes: [{ path: FILE, diff: '@@\n-old\n+new\n+more\n' }],
   };
   assert.deepEqual(itemStarted(change, CWD), {
     type: 'tool-start',
@@ -90,9 +90,24 @@ test('a file change is always reported as refused', () => {
     target: 'src/main.ts',
   });
   assert.deepEqual(itemCompleted(change), {
-    type: 'tool-error',
+    type: 'tool-result',
     id: 'patch_1',
-    error: 'Writes are disabled: Polaris is read-only.',
+    summary: '+2 -1',
+  });
+});
+
+test('a declined change is a refusal, not a failure', () => {
+  const change = {
+    type: 'fileChange',
+    id: 'patch_2',
+    status: 'declined',
+    changes: [{ path: FILE, diff: '' }],
+  };
+  assert.deepEqual(itemCompleted(change), {
+    type: 'tool-error',
+    id: 'patch_2',
+    error: 'Declined by the user.',
+    denied: true,
   });
 });
 

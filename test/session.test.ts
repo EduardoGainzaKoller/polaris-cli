@@ -4,6 +4,7 @@ import { PolarisError } from '../src/core/errors.ts';
 import { Session } from '../src/core/session.ts';
 import { mockProvider } from '../src/providers/mock/index.ts';
 import { getProvider, type ModelEvent, registerProvider } from '../src/providers/provider.ts';
+import { testSession } from './helpers.ts';
 
 registerProvider(mockProvider);
 
@@ -23,7 +24,7 @@ test('provider dispatch: registered providers resolve by id, unknown ones do not
 });
 
 test('mock provider streams a turn as start / deltas / end', async () => {
-  const model = await mockProvider.createSession({ cwd: '/tmp' });
+  const model = await mockProvider.createSession(testSession('/tmp'));
   const events = await collect(model.send('hello'));
 
   assert.equal(events.at(0)?.type, 'message-start');
@@ -34,7 +35,7 @@ test('mock provider streams a turn as start / deltas / end', async () => {
 });
 
 test('mock provider honours an abort signal', async () => {
-  const model = await mockProvider.createSession({ cwd: '/tmp' });
+  const model = await mockProvider.createSession(testSession('/tmp'));
   await assert.rejects(() => collect(model.send('hello', AbortSignal.abort())));
 });
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -10,6 +10,7 @@ import { loadConfig, saveConfig } from '../src/config/config.ts';
 import { PolarisApp } from '../src/core/app.ts';
 import { mockProvider } from '../src/providers/mock/index.ts';
 import { registerProvider } from '../src/providers/provider.ts';
+import { PERMISSION_PROFILES, TEST_ACCESS } from './helpers.ts';
 
 registerProvider(mockProvider);
 
@@ -77,7 +78,18 @@ test('the registry resolves names and aliases and lists every command', () => {
   assert.equal(commands.get('nope'), undefined);
   assert.deepEqual(
     commands.list().map((command) => command.name),
-    ['clear', 'config', 'effort', 'exit', 'help', 'model', 'provider', 'status', 'tools'],
+    [
+      'clear',
+      'config',
+      'effort',
+      'exit',
+      'help',
+      'model',
+      'permissions',
+      'provider',
+      'status',
+      'tools',
+    ],
   );
 });
 
@@ -169,8 +181,10 @@ test('/model uses discovery when the provider supports it', async () => {
 test('/model explains when the provider cannot enumerate models', async () => {
   registerProvider({
     id: 'no-discovery',
+    supports: PERMISSION_PROFILES,
     async createSession() {
       return {
+        access: TEST_ACCESS,
         model: 'fixed-1',
         async *send(): AsyncIterable<never> {},
         async close() {},
@@ -206,11 +220,12 @@ test('/config shows the file and values, /config save writes them', async () => 
     assert.match(h.lastNotice(), /provider\s+mock/);
 
     await registry().get('config')?.run(h.context, ['save']);
-    assert.match(h.lastNotice(), /Saved provider, model and effort/);
+    assert.match(h.lastNotice(), /Saved provider, model, effort and permissions/);
 
     const written = JSON.parse(await readFile(join(home, 'config.json'), 'utf8')) as unknown;
-    assert.deepEqual(written, { provider: 'mock', model: 'echo', effort: 'medium' });
-    assert.deepEqual(await loadConfig(), { provider: 'mock', model: 'echo', effort: 'medium' });
+    const saved = { provider: 'mock', permissions: 'ask', model: 'echo', effort: 'medium' };
+    assert.deepEqual(written, saved);
+    assert.deepEqual(await loadConfig(), saved);
     await h.app.close();
   } finally {
     if (previous === undefined) delete process.env.POLARIS_HOME;
@@ -224,7 +239,15 @@ test('a malformed config file falls back to defaults instead of failing', async 
   process.env.POLARIS_HOME = home;
   try {
     await saveConfig({ provider: 'codex' });
-    assert.deepEqual(await loadConfig(), { provider: 'codex' });
+    assert.deepEqual(await loadConfig(), { provider: 'codex', permissions: 'ask' });
+
+    // A profile nobody recognises must fall back to the default, never widen.
+    await writeFile(
+      join(home, 'config.json'),
+      JSON.stringify({ provider: 'codex', permissions: 'full-access' }),
+      'utf8',
+    );
+    assert.deepEqual(await loadConfig(), { provider: 'codex', permissions: 'ask' });
   } finally {
     if (previous === undefined) delete process.env.POLARIS_HOME;
     else process.env.POLARIS_HOME = previous;

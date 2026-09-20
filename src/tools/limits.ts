@@ -32,3 +32,28 @@ export const ALWAYS_IGNORED = ['.git', 'node_modules'] as const;
 
 /** Model round-trips allowed in one turn before Polaris stops the loop. */
 export const MAX_TOOL_ROUNDS = 25;
+
+/** Diff lines shown in an approval preview before it is cut. */
+export const MAX_DIFF_LINES = 40;
+
+/** Largest file `write_file` will create or replace. */
+export const MAX_WRITE_BYTES = 5 * 1024 * 1024;
+
+/** How long a command may run before Polaris terminates it. */
+export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+
+/** Ceiling on a timeout the model may ask for. */
+export const MAX_COMMAND_TIMEOUT_MS = 600_000;
+
+/**
+ * Characters of combined stdout/stderr returned to the model. The UI receives
+ * the whole stream as it arrives; only what goes back into the context is cut,
+ * because a test suite can easily produce megabytes.
+ */
+export const MAX_COMMAND_OUTPUT = 30_000;
+
+/** Output lines kept from the start when a command's output is truncated. */
+export const COMMAND_OUTPUT_HEAD_LINES = 60;
+
+/** Output lines kept from the end — where a failure usually is. */
+export const COMMAND_OUTPUT_TAIL_LINES = 120;

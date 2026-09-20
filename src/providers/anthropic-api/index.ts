@@ -1,9 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
+import type { PermissionProfile } from '../../permissions/policy.ts';
+import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
 import { toolFinished, toolResultText, toolStarted } from '../../tools/events.ts';
 import { MAX_TOOL_ROUNDS } from '../../tools/limits.ts';
-import { createReadOnlyRegistry, POLARIS_TOOL_ACCESS } from '../../tools/registry.ts';
+import { createRegistry, polarisAccess } from '../../tools/registry.ts';
 import type {
   ModelEvent,
   ModelProvider,
@@ -29,14 +31,39 @@ const DEFAULT_EFFORT = 'medium';
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 type Effort = (typeof EFFORTS)[number];
 
-const SYSTEM_PROMPT = [
-  'You are Polaris, a coding assistant running inside an interactive terminal CLI.',
-  'Answer in plain text: the terminal does not render Markdown yet.',
-  'You can inspect the workspace with read_file, glob_files and grep_text. Paths are',
-  'relative to the workspace root. Look at the code before answering questions about it.',
-  'Your access is read-only: you cannot create, edit, move or delete files, or run commands.',
-  'If asked to change something, say so and describe the change instead.',
-].join(' ');
+/**
+ * The prompt states the policy the tools already enforce. It exists so the
+ * model plans sensibly — proposing an edit it is not allowed to make wastes a
+ * turn — not as the enforcement itself, which is the registry and the gate.
+ */
+function systemPrompt(profile: PermissionProfile): string {
+  const shared = [
+    'You are Polaris, a coding assistant running inside an interactive terminal CLI.',
+    'Answer in plain text: the terminal does not render Markdown yet.',
+    'You can inspect the workspace with read_file, glob_files and grep_text. Paths are',
+    'relative to the workspace root. Look at the code before answering questions about it.',
+  ];
+  if (profile === 'read-only') {
+    return [
+      ...shared,
+      'Your access is read-only: you cannot create, edit, move or delete files, or run commands.',
+      'If asked to change something, say so and describe the change instead.',
+    ].join(' ');
+  }
+  return [
+    ...shared,
+    'You can also change the workspace with write_file and edit_file, and run commands with',
+    'run_command. Everything stays inside the workspace root. Prefer edit_file over write_file',
+    'for a change to part of a file, and always read a file before editing it, because oldText',
+    'must match exactly.',
+    profile === 'ask'
+      ? 'Writes, edits and commands need the user to approve each one.'
+      : 'Commands need the user to approve each one; workspace edits do not.',
+    'If the user refuses an operation, do not repeat it: explain what you wanted to do or',
+    'suggest an alternative. A non-zero exit code from run_command is information, not a',
+    'failure of the tool — read the output and decide what to do next.',
+  ].join(' ');
+}
 
 /**
  * Polaris owns the agent loop here, because the Messages API is stateless:
@@ -46,7 +73,7 @@ const SYSTEM_PROMPT = [
  */
 export const anthropicApiProvider: ModelProvider = {
   id: 'anthropic-api',
-  access: POLARIS_TOOL_ACCESS,
+  supports: PERMISSION_PROFILES,
   async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
     // Credentials are resolved by the SDK itself (ANTHROPIC_API_KEY,
     // ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile). Polaris never
@@ -59,7 +86,8 @@ export const anthropicApiProvider: ModelProvider = {
     }
 
     const model = options.model ?? DEFAULT_MODEL;
-    const registry = createReadOnlyRegistry();
+    const registry = createRegistry(options.permissions, options.gate);
+    const prompt = systemPrompt(options.permissions);
     const tools: Anthropic.Tool[] = registry.list().map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -72,6 +100,7 @@ export const anthropicApiProvider: ModelProvider = {
 
     return {
       model,
+      access: polarisAccess(options.permissions),
       get effort() {
         return effort;
       },
@@ -102,7 +131,7 @@ export const anthropicApiProvider: ModelProvider = {
               {
                 model,
                 max_tokens: MAX_TOKENS,
-                system: SYSTEM_PROMPT,
+                system: prompt,
                 output_config: { effort },
                 tools,
                 messages,
@@ -126,18 +155,22 @@ export const anthropicApiProvider: ModelProvider = {
             );
             if (message.stop_reason !== 'tool_use' || calls.length === 0) break;
 
-            for (const call of calls) yield toolStarted(registry, call.id, call.name, call.input);
-            // Read-only calls are independent, so parallel requests run in parallel.
-            const results = await Promise.all(
-              calls.map((call) =>
-                registry.execute(call.name, call.input, {
-                  cwd: options.cwd,
-                  ...(signal ? { signal } : {}),
-                }),
-              ),
-            );
-            for (const [index, result] of results.entries()) {
-              const call = calls[index] as Anthropic.ToolUseBlock;
+            // One at a time, and in the order the model asked. Read-only calls
+            // could run in parallel, but a mutating one cannot: two approvals
+            // open at once is a UI nobody can answer, and two writes racing on
+            // one file is worse. Ordering costs a little latency and buys a
+            // transcript that matches what actually happened.
+            const results = [];
+            for (const call of calls) {
+              yield toolStarted(registry, call.id, call.name, call.input);
+              const streamed: ModelEvent[] = [];
+              const result = await registry.execute(call.name, call.input, {
+                cwd: options.cwd,
+                ...(signal ? { signal } : {}),
+                onOutput: (text) => streamed.push({ type: 'tool-output-delta', id: call.id, text }),
+              });
+              for (const event of streamed) yield event;
+              results.push(result);
               yield toolFinished(call.id, result);
             }
             // Every result in a single user message, errors included: splitting

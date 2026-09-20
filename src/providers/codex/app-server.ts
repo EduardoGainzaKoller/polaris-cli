@@ -13,8 +13,11 @@ export interface CodexConnection {
   notify(method: string, params?: unknown): void;
   /** Server-initiated notifications (streaming events, status changes, ...). */
   onNotification(handler: (method: string, params: JsonObject) => void): void;
-  /** Server-initiated requests, e.g. approvals. Throwing returns a JSON-RPC error. */
-  onRequest(handler: (method: string, params: JsonObject) => unknown): void;
+  /**
+   * Server-initiated requests, e.g. approvals. May answer asynchronously — an
+   * approval waits for a person — and throwing returns a JSON-RPC error.
+   */
+  onRequest(handler: (method: string, params: JsonObject) => Promise<unknown>): void;
   /** Rejects pending work and reports why the runtime went away. */
   onClose(handler: (error: Error) => void): void;
   close(): Promise<void>;
@@ -43,7 +46,7 @@ function createConnection(child: ChildProcessWithoutNullStreams): CodexConnectio
     { resolve: (value: never) => void; reject: (e: Error) => void }
   >();
   let notificationHandler: ((method: string, params: JsonObject) => void) | null = null;
-  let requestHandler: ((method: string, params: JsonObject) => unknown) | null = null;
+  let requestHandler: ((method: string, params: JsonObject) => Promise<unknown>) | null = null;
   let closeHandler: ((error: Error) => void) | null = null;
   let nextId = 0;
   let closed: Error | null = null;
@@ -93,7 +96,7 @@ function createConnection(child: ChildProcessWithoutNullStreams): CodexConnectio
       return;
     }
     if (typeof method === 'string') {
-      respond(id, method, (message.params as JsonObject | undefined) ?? {});
+      void respond(id, method, (message.params as JsonObject | undefined) ?? {});
       return;
     }
     if (typeof id !== 'number') return;
@@ -108,9 +111,12 @@ function createConnection(child: ChildProcessWithoutNullStreams): CodexConnectio
     request.resolve(message.result as never);
   }
 
-  function respond(id: unknown, method: string, params: JsonObject): void {
+  async function respond(id: unknown, method: string, params: JsonObject): Promise<void> {
     try {
-      const result = requestHandler?.(method, params);
+      if (!requestHandler) throw new Error(`unhandled request ${method}`);
+      // Approvals wait for a person, so this can take minutes. The connection
+      // stays readable meanwhile: nothing here blocks the stdout reader.
+      const result = await requestHandler(method, params);
       if (result === undefined) throw new Error(`unhandled request ${method}`);
       write({ jsonrpc: '2.0', id, result: result as JsonObject });
     } catch (error) {

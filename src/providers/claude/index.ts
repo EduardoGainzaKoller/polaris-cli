@@ -7,6 +7,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
+import { PERMISSION_PROFILES, type PermissionProfile } from '../../permissions/policy.ts';
 import type {
   ModelEvent,
   ModelProvider,
@@ -15,10 +16,11 @@ import type {
 } from '../provider.ts';
 import { toPolarisError, turnFailure } from './errors.ts';
 import {
-  CLAUDE_TOOL_ACCESS,
   ClaudeToolTranslator,
+  claudeAccess,
   DENIED_TOOLS,
-  READ_ONLY_TOOLS,
+  permissionBridge,
+  toolsFor,
   workspaceGuard,
 } from './tools.ts';
 
@@ -54,14 +56,31 @@ export type QueryFn = (args: {
   options?: Options;
 }) => ClaudeRun;
 
-const SYSTEM_PROMPT = [
-  'You are Polaris, a coding assistant running inside an interactive terminal CLI.',
-  'Answer in plain text: the terminal does not render Markdown yet.',
-  'You can inspect the workspace with Read, Glob and Grep; look at the code before',
-  'answering questions about it. Your access is read-only: you cannot create, edit,',
-  'move or delete files, or run commands. If asked to change something, say so and',
-  'describe the change instead.',
-].join(' ');
+function systemPrompt(profile: PermissionProfile): string {
+  const shared = [
+    'You are Polaris, a coding assistant running inside an interactive terminal CLI.',
+    'Answer in plain text: the terminal does not render Markdown yet.',
+    'You can inspect the workspace with Read, Glob and Grep; look at the code before',
+    'answering questions about it.',
+  ];
+  if (profile === 'read-only') {
+    return [
+      ...shared,
+      'Your access is read-only: you cannot create, edit, move or delete files, or run',
+      'commands. If asked to change something, say so and describe the change instead.',
+    ].join(' ');
+  }
+  return [
+    ...shared,
+    'You can change files with Write and Edit and run commands with Bash, always inside',
+    'the workspace root.',
+    profile === 'ask'
+      ? 'The user approves every write, edit and command individually.'
+      : 'The user approves every command individually; workspace edits apply directly.',
+    'If the user refuses an operation, do not repeat it: explain what you wanted to do or',
+    'suggest an alternative.',
+  ].join(' ');
+}
 
 /**
  * v0.5 gives the runtime exactly three read-only tools, four locks deep:
@@ -72,10 +91,12 @@ const SYSTEM_PROMPT = [
  * nothing on disk can widen that surface.
  */
 const BASE_OPTIONS: Options = {
-  systemPrompt: SYSTEM_PROMPT,
-  tools: [...READ_ONLY_TOOLS],
   disallowedTools: DENIED_TOOLS,
-  permissionMode: 'dontAsk',
+  // `default` is what routes prompts to `canUseTool`; the profile decides what
+  // that callback does with them. `dontAsk` would deny instead of asking, and
+  // `acceptEdits`/`bypassPermissions` would take the decision away from the
+  // user — the one thing v0.6 exists to prevent.
+  permissionMode: 'default',
   settingSources: [],
   includePartialMessages: true,
   persistSession: false,
@@ -87,7 +108,7 @@ const EXECUTABLE = process.env.POLARIS_CLAUDE_EXECUTABLE;
 export function createClaudeProvider(run: QueryFn = query): ModelProvider {
   return {
     id: 'claude',
-    access: CLAUDE_TOOL_ACCESS,
+    supports: PERMISSION_PROFILES,
     async createSession(session: ProviderSessionOptions): Promise<ModelSession> {
       const queue = createMessageQueue();
       // The runtime owns the conversation: one `query()` spans the whole Polaris
@@ -111,7 +132,12 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
             options: {
               ...BASE_OPTIONS,
               cwd: session.cwd,
-              hooks: { PreToolUse: [{ hooks: [workspaceGuard(session.cwd)] }] },
+              systemPrompt: systemPrompt(session.permissions),
+              tools: toolsFor(session.permissions),
+              canUseTool: permissionBridge(session.cwd, session.gate),
+              hooks: {
+                PreToolUse: [{ hooks: [workspaceGuard(session.cwd, session.permissions)] }],
+              },
               ...(session.model ? { model: session.model } : {}),
               ...(effort ? { effort } : {}),
               ...(EXECUTABLE ? { pathToClaudeCodeExecutable: EXECUTABLE } : {}),
@@ -124,6 +150,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       }
 
       return {
+        access: claudeAccess(session.permissions),
         get model() {
           return model;
         },

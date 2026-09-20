@@ -1,5 +1,6 @@
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
+import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
 import { VERSION } from '../../version.ts';
 import type {
   ModelEvent,
@@ -8,21 +9,18 @@ import type {
   ProviderSessionOptions,
 } from '../provider.ts';
 import { type Connect, connectToAppServer, type JsonObject } from './app-server.ts';
-import { notAuthenticated, toPolarisError, turnFailed } from './errors.ts';
-import { CODEX_TOOL_ACCESS, isToolItem, itemCompleted, itemStarted } from './items.ts';
+import { type FileChange, threadPolicy, toCard, toDecision } from './approvals.ts';
+import { adminRestricted, notAuthenticated, toPolarisError, turnFailed } from './errors.ts';
+import { codexAccess, isToolItem, itemCompleted, itemStarted } from './items.ts';
 
 /**
- * Codex keeps its own agent loop and may inspect the workspace, but only inside
- * a read-only sandbox (which also has no network). It never asks for approval,
- * and any approval request that reaches Polaris anyway is declined — there is
- * no approval UI yet, and accepting silently would be the wrong default. Web
- * search is turned off explicitly, whatever the user's Codex config says.
+ * Codex keeps its own agent loop and runs inside its own OS sandbox. Polaris
+ * chooses which sandbox and which approval policy from the active profile —
+ * never `danger-full-access` — and lets Codex enforce it. Web search is turned
+ * off explicitly, whatever the user's Codex config says, because v0.6 has no
+ * network capability.
  */
-const THREAD_DEFAULTS = {
-  sandbox: 'read-only',
-  approvalPolicy: 'never',
-  config: { web_search: 'disabled' },
-} as const;
+const THREAD_DEFAULTS = { config: { web_search: 'disabled' } } as const;
 
 /**
  * Codex streams far more than Polaris renders. Agent text and tool-like items
@@ -35,12 +33,23 @@ const RENDERED = 'item/agentMessage/delta';
 export function createCodexProvider(connect: Connect = connectToAppServer): ModelProvider {
   return {
     id: 'codex',
-    access: CODEX_TOOL_ACCESS,
+    supports: PERMISSION_PROFILES,
     async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
       const connection = await connect();
       const turns = new TurnRouter(options.cwd);
       connection.onNotification((method, params) => turns.handle(method, params));
-      connection.onRequest(decline);
+      connection.onRequest(async (method, params) => {
+        const card = toCard(method, params, (itemId) => turns.changesOf(itemId), options.cwd);
+        if (!card) {
+          // Anything Polaris cannot present is refused rather than guessed at:
+          // a silent yes to an unknown request is the worst possible default.
+          debug('codex', 'declining unsupported request', method);
+          return toDecision(method, false);
+        }
+        const { capability, ...request } = card;
+        const verdict = await options.gate.authorize(capability, request);
+        return toDecision(method, verdict.allowed);
+      });
       connection.onClose((error) => turns.abortAll(error));
 
       let threadId: string;
@@ -65,9 +74,26 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
         if (!auth?.authMethod) throw notAuthenticated();
         debug('codex', 'authenticated via', auth.authMethod);
 
+        // An administrator can restrict which sandboxes and approval policies
+        // this install may use. Polaris asks first and reports the restriction
+        // instead of trying a value it is not allowed to set.
+        const policy = threadPolicy(options.permissions);
+        const requirements = (
+          await connection.request<ConfigRequirementsResponse>('configRequirements/read', {})
+        )?.requirements;
+        const allowedSandboxes = requirements?.allowedSandboxModes ?? null;
+        if (allowedSandboxes && !allowedSandboxes.includes(policy.sandbox)) {
+          throw adminRestricted('sandbox', policy.sandbox, allowedSandboxes);
+        }
+        const allowedPolicies = requirements?.allowedApprovalPolicies ?? null;
+        if (allowedPolicies && !allowedPolicies.includes(policy.approvalPolicy)) {
+          throw adminRestricted('approval policy', policy.approvalPolicy, allowedPolicies);
+        }
+
         const thread = await connection.request<ThreadStartResponse>('thread/start', {
           cwd: options.cwd,
           ...THREAD_DEFAULTS,
+          ...policy,
           ...(options.model ? { model: options.model } : {}),
         });
         threadId = thread.thread.id;
@@ -93,6 +119,7 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
       };
 
       return {
+        access: codexAccess(options.permissions),
         get model() {
           return model;
         },
@@ -180,19 +207,6 @@ function wrap(error: unknown): Error {
   return error instanceof PolarisError ? error : toPolarisError(error);
 }
 
-/**
- * Polaris never grants tool approvals yet, so every approval request is
- * declined explicitly. Answering (instead of ignoring) matters: an unanswered
- * request would stall the turn forever.
- */
-function decline(method: string): unknown {
-  if (method.endsWith('requestApproval')) return { decision: 'decline' };
-  if (method === 'execCommandApproval' || method === 'applyPatchApproval') {
-    return { decision: { denied: { rejection: 'Polaris does not grant approvals.' } } };
-  }
-  throw new Error(`unsupported request ${method}`);
-}
-
 type TurnEvent =
   | { type: 'delta'; text: string }
   | { type: 'tool'; event: ModelEvent }
@@ -203,10 +217,21 @@ type TurnEvent =
 class TurnRouter {
   #open = new Set<Turn>();
   #byId = new Map<string, Turn>();
+  /**
+   * The proposed changes of each fileChange item, kept from `item/started`.
+   * The approval request that follows carries only ids, so without this the
+   * card would have no diff to show — and a change nobody can see is a change
+   * nobody can consent to.
+   */
+  #changes = new Map<string, FileChange[]>();
   readonly #cwd: string;
 
   constructor(cwd: string) {
     this.#cwd = cwd;
+  }
+
+  changesOf(itemId: string): FileChange[] | undefined {
+    return this.#changes.get(itemId);
   }
 
   open(): Turn {
@@ -262,11 +287,29 @@ class TurnRouter {
       this.#route(turnId)?.push({ type: 'failed', detail: detailOf(params) });
       return;
     }
-    if ((method === 'item/started' || method === 'item/completed') && isToolItem(params.item)) {
-      const event =
-        method === 'item/started'
-          ? itemStarted(params.item, this.#cwd)
-          : itemCompleted(params.item);
+    // Long commands print as they go; the UI shows it live, and what the model
+    // finally reads is Codex's own item result.
+    if (method === 'item/commandExecution/outputDelta') {
+      const itemId = typeof params.itemId === 'string' ? params.itemId : '';
+      const delta = typeof params.delta === 'string' ? params.delta : '';
+      if (itemId && delta) {
+        this.#route(turnId)?.push({
+          type: 'tool',
+          event: { type: 'tool-output-delta', id: itemId, text: delta },
+        });
+      }
+      return;
+    }
+    if (
+      (method === 'item/started' ||
+        method === 'item/completed' ||
+        method === 'item/fileChange/patchUpdated') &&
+      isToolItem(params.item)
+    ) {
+      const item = params.item;
+      if (item.type === 'fileChange') this.#changes.set(item.id as string, fileChanges(item));
+      if (method === 'item/fileChange/patchUpdated') return;
+      const event = method === 'item/started' ? itemStarted(item, this.#cwd) : itemCompleted(item);
       this.#route(turnId)?.push({ type: 'tool', event });
       return;
     }
@@ -324,12 +367,28 @@ class Turn {
   }
 }
 
+function fileChanges(item: JsonObject): FileChange[] {
+  const changes = (Array.isArray(item.changes) ? item.changes : []) as Array<{
+    path?: string;
+    diff?: string;
+  }>;
+  return changes.map((change) => ({ path: change.path ?? '', diff: change.diff ?? '' }));
+}
+
 function detailOf(error: unknown): string | undefined {
   if (typeof error === 'string') return error;
   if (typeof error === 'object' && error !== null && 'message' in error) {
     return String((error as { message: unknown }).message);
   }
   return undefined;
+}
+
+/** `configRequirements/read`; null when no administrator policy applies. */
+interface ConfigRequirementsResponse {
+  requirements?: {
+    allowedSandboxModes?: string[] | null;
+    allowedApprovalPolicies?: string[] | null;
+  } | null;
 }
 
 interface ThreadStartResponse {

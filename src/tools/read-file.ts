@@ -17,6 +17,7 @@ export interface ReadFileInput {
 export const readFile: ToolDefinition<ReadFileInput> = {
   name: 'read_file',
   title: 'Read',
+  capability: 'read',
   description:
     'Read a text file from the workspace. Returns numbered lines. Use offset and limit to read ' +
     `part of a large file (at most ${MAX_READ_LINES} lines per call).`,

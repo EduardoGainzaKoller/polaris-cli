@@ -95,6 +95,10 @@ function state(partial: Partial<AppState> = {}): AppState {
     busy: false,
     messages: [],
     turns: 0,
+    access: null,
+    effort: null,
+    permissions: 'ask',
+    approval: null,
     ...partial,
   };
 }
@@ -103,14 +107,16 @@ test('the status bar drops context as the terminal narrows, never provider or st
   const wide = statusSegments(state(), 120);
   assert.match(wide.left, /codex · gpt-5\.6-luna/);
   assert.match(wide.left, /polaris/);
-  assert.equal(wide.right, 'ready');
+  // The profile sits beside the state: what Polaris may do is as important as
+  // what it is doing.
+  assert.equal(wide.right, 'ask · ready');
 
   const medium = statusSegments(state(), 40);
   assert.equal(medium.left, 'codex · gpt-5.6-luna');
-  assert.equal(medium.right, 'ready');
+  assert.equal(medium.right, 'ask · ready');
 
   const narrow = statusSegments(state({ status: 'streaming' }), 20);
-  assert.equal(narrow.left, 'codex · streaming');
+  assert.equal(narrow.left, 'codex · ask · streaming');
   assert.equal(narrow.right, '');
 });
 

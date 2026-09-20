@@ -7,11 +7,11 @@ const TIPS: ReadonlyArray<readonly [string, string]> = [
   ['/help', 'every command'],
   ['/provider', 'switch provider'],
   ['/model', 'switch model'],
-  ['/effort', 'reasoning effort'],
+  ['/permissions', 'what Polaris may change'],
 ];
 
 /** The empty-session screen: the wordmark, and just enough to get going. */
-export function Home({ width }: { width: number }) {
+export function Home({ width, permissions }: { width: number; permissions: string }) {
   const fits = width >= LOGO_WIDTH + 4;
   return (
     <Box flexDirection="column" alignItems="center">
@@ -27,11 +27,11 @@ export function Home({ width }: { width: number }) {
           ✦ polaris
         </Text>
       )}
-      <Text color={palette.subtle}>{`v${VERSION} · read-only repository access`}</Text>
+      <Text color={palette.subtle}>{`v${VERSION} · permissions: ${permissions}`}</Text>
       <Box flexDirection="column" marginTop={1}>
         {TIPS.map(([command, description]) => (
           <Text key={command}>
-            <Text color={palette.accent}>{command.padEnd(11)}</Text>
+            <Text color={palette.accent}>{command.padEnd(14)}</Text>
             <Text color={palette.muted}>{description}</Text>
           </Text>
         ))}

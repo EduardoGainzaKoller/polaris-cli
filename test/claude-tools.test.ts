@@ -4,6 +4,7 @@ import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { type ClaudeRun, createClaudeProvider } from '../src/providers/claude/index.ts';
 import { ClaudeToolTranslator } from '../src/providers/claude/tools.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
+import { testSession } from './helpers.ts';
 
 const CWD = process.platform === 'win32' ? 'C:\\work' : '/work';
 const MAIN = process.platform === 'win32' ? 'C:\\work\\src\\main.ts' : '/work/src/main.ts';
@@ -77,7 +78,7 @@ test('the provider streams tool events from the runtime in order', async () => {
     },
   });
 
-  const session = await createClaudeProvider(run).createSession({ cwd: CWD });
+  const session = await createClaudeProvider(run).createSession(testSession(CWD));
   const events: ModelEvent[] = [];
   for await (const event of session.send('Where is ModelProvider?')) events.push(event);
 

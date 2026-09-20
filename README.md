@@ -1,29 +1,38 @@
 # Polaris
 
 A terminal application for working with coding agents. You run `polaris` once and keep a
-conversation going: the agent explores your repository on its own, answers stream in, the
-provider and model are always on screen, and Ctrl+C cancels a single turn without killing
-the session.
+conversation going: the agent explores your repository on its own, proposes changes and
+runs commands, answers stream in, the provider and model are always on screen, and Ctrl+C
+cancels a single turn without killing the session.
+
+Every operation that changes something is shown to you before it happens — the file, the
+diff, the exact command — and waits for you to allow or deny it.
 
 ```text
- ✦ my-project                                                              v0.5.0
+ ✦ my-project                                                              v0.6.0
 
   ┃
-  ┃ Analiza la arquitectura de este proyecto
+  ┃ Añade validación a createUser y ejecuta los tests
   ┃
 
-  ✓ Glob src/**/*.ts                                                          31 files
-  ✓ Read package.json                                                         42 lines
-  ✓ Grep "ModelProvider"                                          8 matches in 5 files
+  ✓ Read src/user/UserService.ts                                             142 lines
+  ✓ Grep "createUser"                                              4 matches in 2 files
+  ✓ Edit src/user/UserService.ts                                                 +6 -1
 
-  El proyecto separa el núcleo de la interfaz…
-  ◇ gpt-5.6-luna · high · 12.4s
+ ╭─ Permission required ───────────────────────────────────── enter allow · d deny ─╮
+ │ Run command                                                                      │
+ │ npm test                                                                         │
+ │ cwd: ~/projects/my-project                                                       │
+ │ timeout: 120s                                                                    │
+ │                                                                                  │
+ │ enter  Allow once                                                        d  Deny │
+ ╰──────────────────────────────────────────────────────────────────────────────────╯
 
  ╭──────────────────────────────────────────────────────────────────────────────────╮
  │ > Ask anything, or type / for commands                                           │
- │  READ-ONLY   codex · gpt-5.6-luna · high                              enter send │
+ │  ASK   codex · gpt-5.6-luna · high                                    enter send │
  ╰──────────────────────────────────────────────────────────────────────────────────╯
- ● ready   ~/projects/my-project          ↑↓ history · pgup/pgdn scroll · / commands
+ ● approval required   ~/projects/my-project     enter allow · d deny · ctrl+c cancel
 ```
 
 Polaris renders full-screen when it owns a terminal, and falls back to a plain
@@ -57,37 +66,94 @@ polaris
 
 During development, `npm run dev` compiles and runs in one step.
 
-## Repository tools
+## Tools
 
-Polaris can look at the project it was started in — and, in this version, **only look**.
+Polaris works on the project it was started in, and never outside it.
 
-| Tool | What it does |
-| --- | --- |
-| **Read** | Reads a text file, whole or as a line range |
-| **Glob** | Lists files matching a pattern such as `src/**/*.ts` |
-| **Grep** | Searches file contents (literal text, or a regular expression) |
+| Tool | What it does | Capability |
+| --- | --- | --- |
+| **Read** | Reads a text file, whole or as a line range | read |
+| **Glob** | Lists files matching a pattern such as `src/**/*.ts` | read |
+| **Grep** | Searches file contents (literal text, or a regular expression) | read |
+| **Write** | Creates a file, or replaces one completely | write |
+| **Edit** | Replaces an exact stretch of text in a file | edit |
+| **Run Command** | Runs a command and returns its output and exit code | command |
 
-The agent decides on its own when to use them, so a question like *"analyse the
-architecture of this project"* is answered after it has actually read the code. Each call
-appears in the transcript as one line with a short outcome (`● Read package.json · 42
-lines`); the file contents go to the model, not to your screen.
+The agent decides on its own when to use them, so *"add validation to `createUser` and run
+the tests"* becomes a real sequence: read the file, propose an edit, run the suite, read
+the failure, try again. Each call is one line in the transcript with a short outcome
+(`✓ Edit src/user.ts  +6 -1`); file contents and command output go to the model, not to
+your screen.
 
-**Current capability mode: read-only.** Polaris v0.5 cannot create, modify, move or delete
-files, and cannot run commands that change anything. Ask it to edit something and it will
-tell you it can't. There is no option to turn writing on; that arrives, with an explicit
-permission system, in a later version.
+**Edit** replaces text that must match **exactly once**. Two matches is an error, not a
+guess — a substitution meant for one line must never quietly rewrite twenty-seven. Pass
+`all` to replace every occurrence deliberately.
 
-The boundary holds for every provider:
+**Run Command** is deliberately not called `bash`: Polaris runs on Windows, Linux and
+macOS, and the command goes to the platform's own shell. A non-zero exit code is a normal
+result the agent reads and acts on, not a crash.
 
-- Paths are confined to the directory Polaris was started in. `..` escapes, absolute paths
-  elsewhere, and symlinks or Windows junctions that point outside are all refused — the
-  check runs on the real, resolved path.
-- `.git` and `node_modules` are never searched, and the root `.gitignore` is honoured
-  (nested `.gitignore` files are not, yet).
-- Binary files are skipped, big files must be read by line range, and long listings or
-  searches are truncated — the agent is told when that happens.
+## Permissions
 
-`/tools` shows what the current provider can do; `/status` includes the mode.
+A capability is what a tool *can* do. A permission is what Polaris may do *right now*.
+They are separate, so "Polaris can edit files" never means "Polaris edits files without
+asking".
+
+| Profile | Read / Glob / Grep | Write / Edit | Run Command |
+| --- | --- | --- | --- |
+| `read-only` | automatic | **denied** | **denied** |
+| `ask` (default) | automatic | **asks every time** | **asks every time** |
+| `workspace-write` | automatic | automatic, inside the workspace | **asks every time** |
+
+```text
+/permissions                    show the profiles and which one is active
+/permissions workspace-write    switch
+/config save                    remember it in ~/.polaris/config.json
+polaris --permissions read-only just for this run, never saved
+```
+
+A few things worth being precise about:
+
+- **Commands always ask, in every profile.** A file write is bounded by the workspace; a
+  command is not — it can reach the network, your home directory or your package manager.
+  Automatic command execution is not something v0.6 offers.
+- **`workspace-write` is not full filesystem access.** It means "edit files inside the
+  directory Polaris was started in, without asking each time". Everything outside stays
+  refused. There is no full-access profile, and no flag to skip permissions.
+- **Under `read-only`, a mutation is impossible rather than discouraged.** The tools are
+  not offered to the model at all, so there is nothing for it to call.
+- **A denial is not an error.** The agent is told a person said no, and can suggest
+  something else or explain what it wanted to do. The session carries on.
+
+### What you see before you decide
+
+A file change shows the unified diff of the change itself (a new file is shown as all
+additions, with the line count; a long one is truncated on screen and says so). A command
+shows the command in full — never shortened — the working directory and the timeout.
+
+`Enter` or `y` allows once; `d`, `n` or `Esc` denies; `Ctrl+C` denies *and* cancels the
+turn. There is no default acceptance: nothing is approved by a stray keystroke, and no
+"always allow" rules are stored anywhere.
+
+### The boundary, and what is not a sandbox
+
+Paths are confined to the directory Polaris was started in. `..` escapes, absolute paths
+elsewhere, and symlinks or Windows junctions that point outside are all refused — the
+check runs on the real, resolved path, for reads, writes, edits and a command's working
+directory alike. Writes go through a temporary file and a rename, so a crash never leaves
+a half-written source file. If a file changes between the moment you are shown a diff and
+the moment the change is applied, the operation is abandoned rather than applied blindly.
+
+`.git` and `node_modules` are never searched, the root `.gitignore` is honoured, binary
+files are skipped, and long reads, listings, searches and command output are truncated
+with the agent told it happened.
+
+**Polaris's own command execution is not sandboxed.** With `anthropic-api` or `mock`, a
+command you approve has the same reach as one you typed into your own shell. What bounds
+it is your approval, a working directory pinned inside the workspace, a timeout, and
+killing the whole process tree when you cancel — not isolation. The Codex runtime is
+different: it runs commands inside its own OS sandbox as well as asking. `/tools` says
+which of the two you are in.
 
 ## Providers
 
@@ -113,17 +179,34 @@ They differ in *what runs the conversation*:
 * `codex` starts one `codex app-server` process, opens a thread, and turns each prompt
   into a turn on that thread.
 
-How each one gets repository access differs, because each runtime has its own official
-mechanism — what you see, and the read-only guarantee, are the same:
+How each one gets repository access and asks for permission differs, because each runtime
+has its own official mechanism — what you see is the same card either way:
 
-- `anthropic-api` and `mock` use **Polaris's own tools**; Polaris runs the tool loop.
-- `claude` uses the runtime's **built-in Read, Glob and Grep and nothing else**. Every other
-  built-in and all MCP tools are removed, the runtime never prompts (it denies instead), a
-  hook enforces the workspace boundary on every call, and no settings, skills, plugins or
-  `CLAUDE.md` are loaded from disk.
-- `codex` explores with its own commands inside a **read-only sandbox without network**,
-  with web search turned off. Approval requests are **declined**, never granted — Polaris
-  has no approval UI, and saying "yes" automatically would be the wrong default.
+- `anthropic-api` and `mock` use **Polaris's own tools**; Polaris runs the tool loop and
+  authorises each call before executing it.
+- `claude` uses the runtime's **built-in Read, Glob, Grep, Write, Edit and Bash**, chosen by
+  the profile. Permission goes through the SDK's official `canUseTool` callback, which
+  Polaris answers from the same gate; a `PreToolUse` hook enforces the workspace boundary
+  on every call. Every other built-in and all MCP tools are removed, and no settings,
+  skills, plugins or `CLAUDE.md` are loaded from disk.
+- `codex` keeps its own agent loop inside its own **OS sandbox** — `read-only` or
+  `workspace-write`, never `danger-full-access` — with web search turned off. Its
+  server-initiated approval requests (`item/commandExecution/requestApproval`,
+  `item/fileChange/requestApproval`) become Polaris approvals, and your answer goes back
+  over the same protocol. If an administrator has restricted the sandbox or approval
+  policy for that install, Polaris reports it rather than working around it.
+
+One difference worth stating plainly: **under `read-only`, Codex still runs commands**.
+That is simply how it reads a repository — its `Read`, `List` and `Grep` are shell
+commands — and they run inside a read-only sandbox with no network, so they cannot change
+anything. They are therefore not asked about. Under `ask` and `workspace-write` every
+command it wants to run is shown to you first, unwrapped: on Windows Codex launches
+everything through `powershell.exe`, and the card shows the command Codex actually parsed,
+not the wrapper.
+
+Polaris does not re-implement either runtime's permission system. The profile is
+translated once into that runtime's own configuration, and the runtime's own callback is
+the only gate — Polaris renders the question, it does not ask a second one.
 
 ### Authentication
 
@@ -197,12 +280,13 @@ Override any of them with `polaris --model <id>`, or with `{"model": "..."}` in
 | Command | Description |
 | --- | --- |
 | `/help` | Show available commands |
-| `/status` | Show cwd, provider, model, tool mode and turn count |
-| `/tools` | Show the repository tools available and the capability mode |
+| `/status` | Show cwd, provider, model, effort, permissions and turn count |
+| `/tools` | Show every tool and whether it is automatic, asks, or is denied |
 | `/provider [id]` | Switch provider — with no id, pick one from a list |
 | `/model [id]` | Switch model — with no id, pick from what the provider reports |
 | `/effort [level]` | Reasoning effort (`low` … `max`, as the model allows) — changes live, the conversation is kept |
-| `/config [save]` | Show the configuration, or save the current provider and model |
+| `/permissions [profile]` | Show the profiles, or switch to `read-only`, `ask` or `workspace-write` |
+| `/config [save]` | Show the configuration, or save provider, model, effort and permissions |
 | `/clear` | Clear the transcript (the provider keeps its conversation) |
 | `/exit` | Exit Polaris (`exit`, `quit`, `/q` also work) |
 
@@ -220,6 +304,8 @@ Type `/` to open the command list: ↑↓ to move, Enter to run, Tab to complete
 | Mouse wheel | Scroll three lines |
 | `Esc` | Jump back to the latest output (or close the command list / a dialog) |
 | `Ctrl+C` | Cancel the running turn; with an empty prompt, exit |
+| `Enter` / `y` | Allow the operation you are being asked about |
+| `d` / `n` / `Esc` | Deny it |
 | `Ctrl+D` | Exit (empty prompt) |
 | `←` `→` `Home` `End`, `Ctrl+A`/`Ctrl+E`, `Ctrl+U` | Edit the prompt |
 

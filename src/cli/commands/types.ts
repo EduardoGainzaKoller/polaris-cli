@@ -16,6 +16,12 @@ export interface Command {
   readonly name: string;
   readonly summary: string;
   readonly aliases?: readonly string[];
+  /**
+   * True when running this would leave the runtime inconsistent while an
+   * approval is open — anything that replaces the provider session, since the
+   * pending request belongs to the session being thrown away.
+   */
+  readonly blockedByApproval?: boolean;
   run(context: CommandContext, args: string[]): void | Promise<void>;
 }
 

@@ -1,12 +1,26 @@
+import type { PermissionGate } from '../permissions/gate.ts';
+import type { Capability, PermissionProfile } from '../permissions/policy.ts';
+import { isAvailable } from '../permissions/policy.ts';
+import type { ToolAccess } from '../providers/provider.ts';
+import { editFileTool } from './edit-file.ts';
 import { globFiles } from './glob-files.ts';
 import { grepText } from './grep-text.ts';
 import { readFile } from './read-file.ts';
+import { runCommandTool } from './run-command.ts';
 import { ToolError } from './workspace.ts';
+import { writeFileTool } from './write-file.ts';
 
 export interface ToolContext {
   /** Workspace root; every path a tool touches must resolve inside it. */
   readonly cwd: string;
   readonly signal?: AbortSignal;
+  /**
+   * The state the approval was granted against, handed back to `execute` so a
+   * mutating tool can refuse a change the user never actually saw.
+   */
+  readonly fingerprint?: string | null;
+  /** Live output while the tool runs; the UI shows it, the model does not. */
+  readonly onOutput?: (text: string) => void;
 }
 
 export interface ToolOutput {
@@ -15,6 +29,25 @@ export interface ToolOutput {
   /** One line for the UI, e.g. "84 lines" — computed here so nobody parses `content`. */
   readonly summary: string;
   readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+/** What the user is shown before authorising a mutating call. */
+export interface ToolPreview {
+  /**
+   * A fuller name for the approval card when the transcript label is too
+   * terse to judge on its own ("Run" is a fine row; "Run command" is what a
+   * person needs to read before saying yes).
+   */
+  readonly title?: string;
+  /** Short rows under the title: `cwd: …`, `New file · 12 lines`. */
+  readonly facts?: readonly string[];
+  /** Unified diff of the proposed change, already cut to a readable size. */
+  readonly diff?: string;
+  /**
+   * A hash of what the change was computed against, or null when the tool has
+   * no meaningful prior state. `execute` receives it back and re-checks it.
+   */
+  readonly fingerprint: string | null;
 }
 
 /** JSON Schema subset the tools use; providers pass it through unchanged. */
@@ -30,12 +63,19 @@ export interface ToolDefinition<TInput = unknown> {
   readonly name: string;
   /** Human name shown in the UI. */
   readonly title: string;
+  /** What this tool does to the world; the permission profile decides the rest. */
+  readonly capability: Capability;
   readonly description: string;
   readonly inputSchema: InputSchema;
   /** Validates untrusted model input; throws ToolError when it is malformed. */
   parse(input: unknown): TInput;
   /** Short description of what the call is about, e.g. the path or pattern. */
   target(input: TInput): string;
+  /**
+   * Describes the change before it happens, for the approval card. Read-only
+   * tools omit it: there is nothing to approve.
+   */
+  preview?(input: TInput, context: ToolContext): Promise<ToolPreview>;
   execute(input: TInput, context: ToolContext): Promise<ToolOutput>;
 }
 
@@ -46,18 +86,27 @@ export type ToolCallResult =
       readonly target: string;
       readonly output: ToolOutput;
     }
-  | { readonly ok: false; readonly title: string; readonly target: string; readonly error: string };
+  | {
+      readonly ok: false;
+      readonly title: string;
+      readonly target: string;
+      readonly error: string;
+      /** True when a person said no — not a failure the model should retry. */
+      readonly denied?: boolean;
+    };
 
 /**
- * The tools Polaris executes itself. In v0.5 the set is fixed and read-only by
- * construction: none of them opens a file for writing, and there is no option
- * to add one that does.
+ * The tools Polaris executes itself. Which ones exist is a capability question
+ * and is answered here, by the profile; whether a call may proceed is a
+ * permission question and is answered by the gate, per call.
  */
 export class ToolRegistry {
   readonly #tools: ReadonlyMap<string, ToolDefinition>;
+  readonly #gate: PermissionGate | undefined;
 
-  constructor(tools: readonly ToolDefinition[]) {
+  constructor(tools: readonly ToolDefinition[], gate?: PermissionGate) {
     this.#tools = new Map(tools.map((tool) => [tool.name, tool]));
+    this.#gate = gate;
   }
 
   list(): ToolDefinition[] {
@@ -81,9 +130,12 @@ export class ToolRegistry {
 
   /**
    * Runs one call. Anything the model can recover from — bad input, a missing
-   * file, a path outside the workspace — comes back as `ok: false` for the
-   * model to read. Only cancellation propagates as an exception, because it
-   * ends the turn rather than informing it.
+   * file, a path outside the workspace, a refused approval — comes back as
+   * `ok: false` for the model to read. Only cancellation propagates as an
+   * exception, because it ends the turn rather than informing it.
+   *
+   * Nothing happens before the gate answers: the preview reads, the approval
+   * waits, and only then does `execute` touch anything.
    */
   async execute(name: string, input: unknown, context: ToolContext): Promise<ToolCallResult> {
     const tool = this.#tools.get(name);
@@ -96,27 +148,90 @@ export class ToolRegistry {
       return { ok: false, title: tool.title, target: '', error: describe(error) };
     }
     const target = tool.target(parsed);
+    const fail = (error: string, denied?: boolean) => ({
+      ok: false as const,
+      title: tool.title,
+      target,
+      error,
+      ...(denied ? { denied: true } : {}),
+    });
 
     try {
       context.signal?.throwIfAborted();
-      const output = await tool.execute(parsed, context);
+
+      let fingerprint: string | null | undefined;
+      if (this.#gate && tool.capability !== 'read') {
+        let preview: ToolPreview = { fingerprint: null };
+        try {
+          preview = (await tool.preview?.(parsed, context)) ?? preview;
+        } catch (error) {
+          // A preview that cannot be computed is a change that cannot be
+          // approved: an unreadable file, a path outside the workspace.
+          if (context.signal?.aborted) throw error;
+          return fail(describe(error));
+        }
+        const verdict = await this.#gate.authorize(
+          tool.capability,
+          {
+            title: preview.title ?? tool.title,
+            target,
+            ...(preview.facts ? { facts: preview.facts } : {}),
+            ...(preview.diff ? { diff: preview.diff } : {}),
+          },
+          context.signal,
+        );
+        if (!verdict.allowed) return fail(verdict.reason, true);
+        fingerprint = preview.fingerprint;
+      }
+
+      const output = await tool.execute(parsed, {
+        ...context,
+        ...(fingerprint === undefined ? {} : { fingerprint }),
+      });
       return { ok: true, title: tool.title, target, output };
     } catch (error) {
       if (context.signal?.aborted) throw error;
-      return { ok: false, title: tool.title, target, error: describe(error) };
+      return fail(describe(error));
     }
   }
 }
 
-/** How Polaris-executed tools are described to the UI and to /tools. */
-export const POLARIS_TOOL_ACCESS = {
-  mode: 'read-only',
-  runtime: 'Polaris',
-  tools: ['read_file', 'glob_files', 'grep_text'],
-} as const;
+/** Every tool Polaris can execute, in the order /tools lists them. */
+const ALL_TOOLS = [
+  readFile,
+  globFiles,
+  grepText,
+  writeFileTool,
+  editFileTool,
+  runCommandTool,
+] as ToolDefinition[];
 
-export function createReadOnlyRegistry(): ToolRegistry {
-  return new ToolRegistry([readFile, globFiles, grepText] as ToolDefinition[]);
+/**
+ * The tools a profile makes available. A denied capability is not offered to
+ * the model at all — under `read-only` there is no `write_file` to call, which
+ * is a stronger guarantee than a prompt that says not to.
+ */
+export function createRegistry(profile: PermissionProfile, gate?: PermissionGate): ToolRegistry {
+  return new ToolRegistry(
+    ALL_TOOLS.filter((tool) => isAvailable(profile, tool.capability)),
+    gate,
+  );
+}
+
+/** How Polaris-executed tools are described to the UI and to /tools. */
+export function polarisAccess(profile: PermissionProfile): ToolAccess {
+  return {
+    mode: profile,
+    runtime: 'Polaris',
+    tools: ALL_TOOLS.filter((tool) => isAvailable(profile, tool.capability)).map(
+      (tool) => tool.name,
+    ),
+  };
+}
+
+/** Capability of a Polaris tool by wire name, for /tools. */
+export function capabilityOf(name: string): Capability | undefined {
+  return ALL_TOOLS.find((tool) => tool.name === name)?.capability;
 }
 
 /** Filesystem errors become sentences; nothing else about the host leaks. */

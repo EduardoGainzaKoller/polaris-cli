@@ -6,6 +6,7 @@ import { loadConfig, polarisHome } from './config/config.ts';
 import { PolarisApp } from './core/app.ts';
 import { toUserMessage } from './core/errors.ts';
 import { debug, isDebug, setDebug, setLogFile } from './core/logger.ts';
+import { isProfile, PERMISSION_PROFILES } from './permissions/policy.ts';
 import { anthropicApiProvider } from './providers/anthropic-api/index.ts';
 import { claudeProvider } from './providers/claude/index.ts';
 import { codexProvider } from './providers/codex/index.ts';
@@ -21,6 +22,8 @@ Usage: polaris [options]
 Options:
   --provider <id>  mock (default), anthropic-api, claude or codex
   --model <id>     Override the configured model
+  --permissions <profile>
+                   read-only, ask (default) or workspace-write, for this run only
   --debug          Print internal logs to stderr
   -v, --version    Print the version
   -h, --help       Show this message
@@ -32,6 +35,7 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
     options: {
       provider: { type: 'string' },
       model: { type: 'string' },
+      permissions: { type: 'string' },
       debug: { type: 'boolean', default: false },
       version: { type: 'boolean', short: 'v', default: false },
       help: { type: 'boolean', short: 'h', default: false },
@@ -58,14 +62,26 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   const config = await loadConfig();
   if (values.provider) config.provider = values.provider;
   if (values.model) config.model = values.model;
+  // A flag is an override for this run and is never written back: a profile
+  // the user passed once must not silently become their stored default.
+  if (values.permissions) {
+    if (!isProfile(values.permissions)) {
+      ui.error(
+        `Unknown permission profile "${values.permissions}". Use one of: ${PERMISSION_PROFILES.join(', ')}.`,
+      );
+      return 1;
+    }
+    config.permissions = values.permissions;
+  }
   debug('main', 'cwd', cwd, 'config', config);
 
-  const app = new PolarisApp({ cwd, config });
-  await app.start();
-
   // The TUI needs a terminal it owns; anything else (pipes, scripts, CI) gets
-  // the line renderer, which drives the very same controller.
+  // the line renderer, which drives the very same controller. Only the former
+  // can present an approval, and a session that cannot ask must not pretend to.
   const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true;
+
+  const app = new PolarisApp({ cwd, config, approvals: interactive });
+  await app.start();
   if (interactive && isDebug()) {
     const file = setLogFile(join(polarisHome(), 'logs', 'polaris.log'));
     ui.line(`debug log: ${file}`);

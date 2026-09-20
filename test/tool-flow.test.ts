@@ -7,9 +7,11 @@ import { builtinCommands } from '../src/cli/commands/builtin.ts';
 import { CommandRegistry } from '../src/cli/commands/registry.ts';
 import type { CommandContext } from '../src/cli/commands/types.ts';
 import { PolarisApp, type UiMessage } from '../src/core/app.ts';
+import type { PermissionProfile } from '../src/permissions/policy.ts';
 import { mockProvider } from '../src/providers/mock/index.ts';
 import { type ModelEvent, registerProvider } from '../src/providers/provider.ts';
 import { transcriptLines } from '../src/ui/layout.ts';
+import { PERMISSION_PROFILES, TEST_ACCESS } from './helpers.ts';
 
 let workspace: string;
 
@@ -19,9 +21,10 @@ registerProvider(mockProvider);
 let script: ModelEvent[] = [];
 registerProvider({
   id: 'scripted',
-  access: { mode: 'read-only', runtime: 'Test runtime', tools: ['Read'] },
+  supports: PERMISSION_PROFILES,
   async createSession() {
     return {
+      access: TEST_ACCESS,
       model: 'scripted-1',
       async *send(_input, signal): AsyncIterable<ModelEvent> {
         for (const event of script) {
@@ -42,8 +45,11 @@ before(async () => {
   await writeFile(join(workspace, 'src', 'provider.ts'), 'export interface ModelProvider {}\n');
 });
 
-async function app(provider: string): Promise<PolarisApp> {
-  const created = new PolarisApp({ cwd: workspace, config: { provider } });
+async function app(provider: string, permissions?: PermissionProfile): Promise<PolarisApp> {
+  const created = new PolarisApp({
+    cwd: workspace,
+    config: { provider, ...(permissions ? { permissions } : {}) },
+  });
   await created.start();
   return created;
 }
@@ -242,26 +248,51 @@ function context(polaris: PolarisApp): CommandContext {
   };
 }
 
-test('/tools lists the capabilities and the read-only mode', async () => {
+async function toolsNotice(profile: PermissionProfile): Promise<string> {
   const registry = new CommandRegistry();
   registry.register(...builtinCommands(registry));
-  const polaris = await app('mock');
-
+  const polaris = await app('mock', profile);
   await registry.get('tools')?.run(context(polaris), []);
   const notice = polaris.state.messages.at(-1)?.text ?? '';
-  assert.match(notice, /Tools \(Polaris\)/);
-  assert.match(notice, /read_file\s+enabled/);
-  assert.match(notice, /glob_files\s+enabled/);
-  assert.match(notice, /grep_text\s+enabled/);
-  assert.match(notice, /Mode: read-only/);
   await polaris.close();
+  return notice;
+}
+
+test('/tools shows every tool with what the profile does about it', async () => {
+  const ask = await toolsNotice('ask');
+  assert.match(ask, /Tools \(Polaris\)/);
+  assert.match(ask, /read_file\s+auto/);
+  assert.match(ask, /glob_files\s+auto/);
+  assert.match(ask, /grep_text\s+auto/);
+  assert.match(ask, /write_file\s+ask/);
+  assert.match(ask, /edit_file\s+ask/);
+  assert.match(ask, /run_command\s+ask/);
+  assert.match(ask, /Permissions: ask/);
+  // Polaris runs commands itself here, with no sandbox, and says so.
+  assert.match(ask, /not sandboxed/);
 });
 
-test('/status reports the tool mode', async () => {
+test('/tools shows denied capabilities under read-only', async () => {
+  const notice = await toolsNotice('read-only');
+  assert.match(notice, /read_file\s+auto/);
+  assert.doesNotMatch(notice, /write_file/);
+  assert.match(notice, /Write\s+denied/);
+  assert.match(notice, /Edit\s+denied/);
+  assert.match(notice, /Run Command\s+denied/);
+});
+
+test('/tools shows edits as automatic under workspace-write, commands still asking', async () => {
+  const notice = await toolsNotice('workspace-write');
+  assert.match(notice, /write_file\s+auto/);
+  assert.match(notice, /edit_file\s+auto/);
+  assert.match(notice, /run_command\s+ask/);
+});
+
+test('/status reports the permission profile', async () => {
   const registry = new CommandRegistry();
   registry.register(...builtinCommands(registry));
-  const polaris = await app('mock');
+  const polaris = await app('mock', 'workspace-write');
   await registry.get('status')?.run(context(polaris), []);
-  assert.match(polaris.state.messages.at(-1)?.text ?? '', /tools\s+read-only/);
+  assert.match(polaris.state.messages.at(-1)?.text ?? '', /perms\s+workspace-write/);
   await polaris.close();
 });

@@ -2,15 +2,22 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { debug } from '../core/logger.ts';
+import { DEFAULT_PROFILE, isProfile, type PermissionProfile } from '../permissions/policy.ts';
 
 export interface PolarisConfig {
   provider: string;
   model?: string;
   /** Reasoning effort, e.g. "high". Left to the model's default when omitted. */
   effort?: string;
+  /**
+   * What Polaris may do to the workspace. Only the profile name is ever
+   * stored: standing rules like "always allow npm" would be a permission
+   * system living in a file nobody reviews, and v0.6 has none.
+   */
+  permissions?: PermissionProfile;
 }
 
-const DEFAULTS: PolarisConfig = { provider: 'mock' };
+const DEFAULTS: PolarisConfig = { provider: 'mock', permissions: DEFAULT_PROFILE };
 
 export function polarisHome(): string {
   return process.env.POLARIS_HOME ?? join(homedir(), '.polaris');
@@ -30,7 +37,17 @@ export async function loadConfig(): Promise<PolarisConfig> {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
     if (typeof parsed !== 'object' || parsed === null) throw new Error('expected an object');
     debug('config', 'loaded', path);
-    return { ...DEFAULTS, ...(parsed as Partial<PolarisConfig>) };
+    const stored = parsed as Partial<PolarisConfig>;
+    return {
+      ...DEFAULTS,
+      ...stored,
+      // An unknown profile in the file falls back to the default rather than
+      // to whatever it happens to spell: a typo must never widen access.
+      permissions:
+        typeof stored.permissions === 'string' && isProfile(stored.permissions)
+          ? stored.permissions
+          : DEFAULT_PROFILE,
+    };
   } catch (error) {
     debug('config', 'using defaults:', (error as Error).message);
     return { ...DEFAULTS };
@@ -41,7 +58,10 @@ export async function loadConfig(): Promise<PolarisConfig> {
 export async function saveConfig(config: PolarisConfig): Promise<string> {
   const path = configPath();
   await mkdir(dirname(path), { recursive: true });
-  const stored: PolarisConfig = { provider: config.provider };
+  const stored: PolarisConfig = {
+    provider: config.provider,
+    permissions: config.permissions ?? DEFAULT_PROFILE,
+  };
   if (config.model) stored.model = config.model;
   if (config.effort) stored.effort = config.effort;
   await writeFile(path, `${JSON.stringify(stored, null, 2)}\n`, 'utf8');
