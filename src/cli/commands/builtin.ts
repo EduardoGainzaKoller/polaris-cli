@@ -1,4 +1,5 @@
 import { configPath, saveConfig } from '../../config/config.ts';
+import { usageLines } from '../../core/usage.ts';
 import {
   decide,
   isProfile,
@@ -29,21 +30,30 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
     },
     {
       name: 'status',
-      summary: 'Show the current session',
-      run({ app }) {
+      summary: 'Show the session, and how much of the model you have used',
+      run: async ({ app }) => {
         const state = app.state;
-        app.notice(
-          [
-            `  cwd       ${shortenPath(state.cwd)}`,
-            `  provider  ${state.provider}`,
-            `  model     ${state.model}`,
-            `  effort    ${state.effort ?? 'default'}`,
-            `  perms     ${state.permissions}`,
-            `  tools     ${state.access?.runtime ?? 'none'}`,
-            `  turns     ${state.turns}`,
-            `  session   ${state.status === 'error' ? 'error' : 'active'}`,
-          ].join('\n'),
-        );
+        const usage = await app.usage();
+        const session = [
+          `  cwd       ${shortenPath(state.cwd)}`,
+          `  provider  ${state.provider}`,
+          `  model     ${state.model}`,
+          `  effort    ${state.effort ?? 'default'}`,
+          `  perms     ${state.permissions}`,
+          `  tools     ${state.access?.runtime ?? 'none'}`,
+          ...(usage?.plan ? [`  plan      ${usage.plan}`] : []),
+          `  turns     ${state.turns}`,
+          `  session   ${state.status === 'error' ? 'error' : 'active'}`,
+        ];
+
+        // Every runtime measures something different, and one of them may
+        // measure nothing at all; say which rather than printing an empty
+        // section or, worse, zeroes that look like measurements.
+        const consumption = usage
+          ? ['', ...usageLines(usage)]
+          : ['', `  ${state.provider} does not report token usage.`];
+
+        app.notice([...session, ...consumption].join('\n'));
       },
     },
     {

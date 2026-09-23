@@ -7,6 +7,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
+import type { ModelUsage, UsageReport } from '../../core/usage.ts';
 import { PERMISSION_PROFILES, type PermissionProfile } from '../../permissions/policy.ts';
 import type {
   ModelEvent,
@@ -120,6 +121,11 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       // after the first turn.
       let frames: AsyncIterator<SDKMessage> | null = null;
       let model = session.model ?? 'default';
+      // The runtime reports a *running total* on every result, not a delta, so
+      // this is replaced each turn. Summing them would multiply the session's
+      // usage by the number of turns — the opposite mistake to the one the
+      // Messages API's per-request counts require.
+      let latest: UsageReport | null = null;
       let effort: EffortLevel | undefined =
         session.effort === undefined ? undefined : asEffort(session.effort);
       const translator = new ClaudeToolTranslator(session.cwd);
@@ -211,6 +217,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
               // A `result` message closes the turn — success, failure or
               // interruption alike — and leaves the session ready for the next.
               if (message.type === 'result') {
+                latest = toUsageReport(message);
                 if (signal?.aborted) signal.throwIfAborted();
                 if (message.is_error) {
                   throw turnFailure(
@@ -234,6 +241,9 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
           const models = await start().supportedModels();
           return models.map((entry) => entry.value);
         },
+        async usage() {
+          return latest;
+        },
         async close() {
           queue.close();
           await active?.return(undefined).catch(() => undefined);
@@ -246,6 +256,52 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
 }
 
 export const claudeProvider: ModelProvider = createClaudeProvider();
+
+/**
+ * The runtime's own accounting, translated. `modelUsage` is keyed by the model
+ * string it served, and carries the context window and the price it was
+ * charged at, so Polaris neither counts tokens nor prices them itself here.
+ */
+export function toUsageReport(message: SDKMessage & { type: 'result' }): UsageReport | null {
+  const byModel = (message as { modelUsage?: Record<string, RuntimeModelUsage> }).modelUsage ?? {};
+  const models: ModelUsage[] = Object.entries(byModel).map(([id, usage]) => ({
+    model: usage.canonicalModel ?? id,
+    tokens: {
+      input: usage.inputTokens ?? 0,
+      output: usage.outputTokens ?? 0,
+      ...(usage.cacheReadInputTokens === undefined
+        ? {}
+        : { cacheRead: usage.cacheReadInputTokens }),
+      ...(usage.cacheCreationInputTokens === undefined
+        ? {}
+        : { cacheWrite: usage.cacheCreationInputTokens }),
+      ...(usage.thinkingTokens === undefined ? {} : { reasoning: usage.thinkingTokens }),
+    },
+    ...(usage.costUSD === undefined ? {} : { costUsd: usage.costUSD }),
+    ...(usage.contextWindow ? { contextWindow: usage.contextWindow } : {}),
+  }));
+
+  const cost = (message as { total_cost_usd?: number }).total_cost_usd;
+  if (models.length === 0 && cost === undefined) return null;
+  return {
+    models,
+    limits: [],
+    ...(cost === undefined ? {} : { costUsd: cost }),
+    note: 'Reported by the Claude runtime for this session; cost is an estimate, not a bill.',
+  };
+}
+
+/** The slice of the SDK's `ModelUsage` Polaris reads. */
+interface RuntimeModelUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  thinkingTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  costUSD?: number;
+  contextWindow?: number;
+  canonicalModel?: string;
+}
 
 /**
  * Turns the REPL's one-prompt-at-a-time loop into the single `AsyncIterable`

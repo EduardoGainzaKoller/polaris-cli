@@ -275,12 +275,49 @@ default applies; Polaris reads back whatever the runtime reports and shows it in
 Override any of them with `polaris --model <id>`, or with `{"model": "..."}` in
 `~/.polaris/config.json`.
 
+## Usage
+
+`/status` answers "how much have I used?" alongside the session facts. Every runtime
+meters something different, so Polaris reports what each one actually measures and stays
+quiet about the rest — a number it did not receive is never invented, and never shown as a
+zero.
+
+```text
+  provider  codex
+  model     gpt-5.6-luna
+  plan      plus
+  turns     4
+
+  Limits
+    5h window  ████░░░░░░░░░░░░░░░░ 21%  resets in 4h 22m
+    weekly     █░░░░░░░░░░░░░░░░░░░  6%  resets in 6d 23h
+
+  Tokens by model
+    gpt-5.6-luna  48k total · 39k in · 1.2k out · 31k cached
+                  context ███░░░░░░░░░░░░░░░░░ 41k / 258k
+```
+
+| Provider | What it can report |
+| --- | --- |
+| `codex` | Your ChatGPT plan, its rolling limit windows as percentages with reset times, this thread's tokens and the model's context window |
+| `claude` | Tokens and an estimated cost per model, and the context window, all reported by the runtime |
+| `anthropic-api` | Tokens per model, counted by Polaris for this session, and the per-minute ceilings the API returns in its response headers. The API prices nothing, so no cost is shown |
+| `mock` | An offline estimate, labelled as such |
+
+Two details that matter if you compare the numbers with a bill:
+
+- **Costs are the runtime's estimate, not an invoice.** Only `claude` reports one at all.
+- **"Tokens" and "context" are different questions.** The token total counts every turn,
+  including the conversation re-sent each time; the context bar is what the conversation
+  is holding right now. The second is the one that tells you how close you are to
+  filling the window.
+
 ## Commands
 
 | Command | Description |
 | --- | --- |
 | `/help` | Show available commands |
-| `/status` | Show cwd, provider, model, effort, permissions and turn count |
+| `/status` | The session, plus how much of the model you have used: plan, limits, tokens |
 | `/tools` | Show every tool and whether it is automatic, asks, or is denied |
 | `/provider [id]` | Switch provider — with no id, pick one from a list |
 | `/model [id]` | Switch model — with no id, pick from what the provider reports |

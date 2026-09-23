@@ -21,6 +21,8 @@ let requests: Array<Record<string, unknown>> = [];
 let reply = ['Hola', ' Eduardo'];
 /** Milliseconds between deltas, so a test can cancel mid-answer. */
 let delayMs = 0;
+/** Rate-limit headers the fake API returns, as the real one does. */
+let rateLimitHeaders: Record<string, string> = {};
 /** Each entry makes one response a tool_use turn instead of text. */
 let toolTurns: Array<Array<{ id: string; name: string; input: unknown }>> = [];
 let workspace: string;
@@ -41,7 +43,7 @@ before(async () => {
     });
     req.on('end', async () => {
       requests.push(JSON.parse(body));
-      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.writeHead(200, { 'content-type': 'text/event-stream', ...rateLimitHeaders });
       res.write(
         sse('message_start', {
           type: 'message_start',
@@ -141,6 +143,7 @@ function toolResultsIn(index: number): Array<Record<string, unknown>> {
 
 function reset(): void {
   requests = [];
+  rateLimitHeaders = {};
   reply = ['Hola', ' Eduardo'];
   delayMs = 0;
   toolTurns = [];
@@ -399,5 +402,64 @@ test('cancelling while a tool runs leaves a history the API still accepts', asyn
   assert.equal(repaired[0]?.type, 'tool_result');
   assert.equal(repaired[0]?.tool_use_id, 'toolu_c');
   assert.equal(repaired[0]?.is_error, true);
+  await session.close();
+});
+
+// -------------------------------------------------------------------- usage
+
+test('tokens are counted per model across the whole session', async () => {
+  reset();
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
+  await collect(session.send('una'));
+  await collect(session.send('dos'));
+
+  const report = await session.usage?.();
+  assert.ok(report, 'the provider reports usage');
+  assert.equal(report.models.length, 1);
+  const [entry] = report.models;
+  assert.equal(entry?.model, DEFAULT_MODEL);
+  // 1 in / 2 out per request, and Polaris owns the loop here, so two turns
+  // must add up rather than replace each other.
+  assert.equal(entry?.tokens.input, 2);
+  assert.equal(entry?.tokens.output, 4);
+  assert.match(report.note ?? '', /no cost/i);
+  assert.equal(report.costUsd, undefined, 'a cost the API never sent is never invented');
+  await session.close();
+});
+
+test('the ceilings come from the response headers, whatever they are named', async () => {
+  reset();
+  const resetsAt = new Date(Date.now() + 90 * 60_000).toISOString();
+  rateLimitHeaders = {
+    'anthropic-ratelimit-requests-limit': '1000',
+    'anthropic-ratelimit-requests-remaining': '900',
+    'anthropic-ratelimit-requests-reset': resetsAt,
+    'anthropic-ratelimit-input-tokens-limit': '80000',
+    'anthropic-ratelimit-input-tokens-remaining': '20000',
+    // A ceiling Polaris has never heard of still shows up, because the
+    // headers are read by shape rather than from a hard-coded list.
+    'anthropic-ratelimit-future-thing-limit': '10',
+    'anthropic-ratelimit-future-thing-remaining': '4',
+  };
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
+  await collect(session.send('hola'));
+
+  const report = await session.usage?.();
+  const limits = Object.fromEntries((report?.limits ?? []).map((limit) => [limit.name, limit]));
+
+  assert.deepEqual(Object.keys(limits).sort(), ['future thing', 'input tokens', 'requests']);
+  assert.equal(limits.requests?.limit, 1000);
+  assert.equal(limits.requests?.remaining, 900);
+  assert.equal(Math.round(limits.requests?.usedPercent ?? 0), 10);
+  assert.equal(limits.requests?.resetsAt?.toISOString(), resetsAt);
+  assert.equal(Math.round(limits['input tokens']?.usedPercent ?? 0), 75);
+  assert.equal(limits['input tokens']?.resetsAt, undefined, 'no reset header, no reset claim');
+  await session.close();
+});
+
+test('a session that never ran a turn reports nothing rather than zeroes', async () => {
+  reset();
+  const session = await anthropicApiProvider.createSession(testSession(workspace));
+  assert.equal(await session.usage?.(), null);
   await session.close();
 });

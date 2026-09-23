@@ -12,6 +12,7 @@ import { type Connect, connectToAppServer, type JsonObject } from './app-server.
 import { type FileChange, threadPolicy, toCard, toDecision } from './approvals.ts';
 import { adminRestricted, notAuthenticated, toPolarisError, turnFailed } from './errors.ts';
 import { codexAccess, isToolItem, itemCompleted, itemStarted } from './items.ts';
+import { buildReport, type RateLimitsResponse, toTokens } from './usage.ts';
 
 /**
  * Codex keeps its own agent loop and runs inside its own OS sandbox. Polaris
@@ -37,7 +38,13 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
     async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
       const connection = await connect();
       const turns = new TurnRouter(options.cwd);
-      connection.onNotification((method, params) => turns.handle(method, params));
+      connection.onNotification((method, params) => {
+        if (method === 'thread/tokenUsage/updated') tokens = toTokens(params) ?? tokens;
+        else if (method === 'account/rateLimits/updated') {
+          rateLimits = (params as RateLimitsResponse).rateLimits ?? rateLimits;
+        }
+        turns.handle(method, params);
+      });
       connection.onRequest(async (method, params) => {
         const card = toCard(method, params, (itemId) => turns.changesOf(itemId), options.cwd);
         if (!card) {
@@ -57,6 +64,12 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
       // Sent with every turn once chosen: Codex takes effort per turn, so a
       // change never needs a new thread.
       let effort: string | undefined = options.effort;
+      // Both halves of the usage picture arrive unprompted: the thread pushes
+      // its token totals, and the account pushes rate limits when they move.
+      // Keeping the latest of each means /status can answer instantly and
+      // still refresh from the server when it can.
+      let tokens: ReturnType<typeof toTokens> = null;
+      let rateLimits: RateLimitsResponse['rateLimits'] = null;
       try {
         await connection.request('initialize', {
           // Honest identification: Polaris is Polaris, not another client.
@@ -186,6 +199,21 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
             signal?.removeEventListener('abort', onAbort);
             turns.close(turn);
           }
+        },
+        async usage() {
+          // Ask the account for the current windows, but never let a failed
+          // read hide the tokens we already have: a usage view that refuses
+          // to render because one number is missing is worse than a partial one.
+          try {
+            const fresh = await connection.request<RateLimitsResponse>(
+              'account/rateLimits/read',
+              {},
+            );
+            rateLimits = fresh?.rateLimits ?? rateLimits;
+          } catch (error) {
+            debug('codex', 'rate limits unavailable', String(error));
+          }
+          return buildReport(model, tokens, rateLimits);
         },
         async listModels() {
           return (await listModels())

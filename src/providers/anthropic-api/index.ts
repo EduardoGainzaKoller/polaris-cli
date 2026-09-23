@@ -13,6 +13,7 @@ import type {
   ProviderSessionOptions,
 } from '../provider.ts';
 import { toPolarisError } from './errors.ts';
+import { UsageTracker } from './usage.ts';
 
 /** Single place to change what Polaris talks to by default. */
 export const DEFAULT_MODEL = 'claude-opus-5';
@@ -88,6 +89,7 @@ export const anthropicApiProvider: ModelProvider = {
     const model = options.model ?? DEFAULT_MODEL;
     const registry = createRegistry(options.permissions, options.gate);
     const prompt = systemPrompt(options.permissions);
+    const usage = new UsageTracker();
     const tools: Anthropic.Tool[] = registry.list().map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -145,6 +147,10 @@ export const anthropicApiProvider: ModelProvider = {
               }
             }
             const message = await stream.finalMessage();
+            // Tokens come from the message; the ceilings come from the
+            // response headers, which is the only place the API states them.
+            usage.record(model, message.usage);
+            usage.recordHeaders(stream.response);
             // The full content goes back into history — tool_use blocks included —
             // so the next request sees exactly what the model produced.
             messages.push({ role: 'assistant', content: message.content });
@@ -199,6 +205,18 @@ export const anthropicApiProvider: ModelProvider = {
       async listModels() {
         const page = await client.models.list({ limit: 50 });
         return page.data.map((entry) => entry.id);
+      },
+      async usage() {
+        const models = usage.models;
+        if (models.length === 0 && usage.limits.length === 0) return null;
+        return {
+          models,
+          limits: usage.limits,
+          // The Messages API prices nothing in its responses, and a cost
+          // computed from a price list Polaris carries would be a guess
+          // presented as a number.
+          note: 'Tokens counted by Polaris for this session. The API reports no cost.',
+        };
       },
       async close() {
         messages.length = 0;

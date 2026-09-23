@@ -9,6 +9,7 @@ import {
 } from '../providers/provider.ts';
 import { PolarisError } from './errors.ts';
 import { debug } from './logger.ts';
+import type { UsageReport } from './usage.ts';
 
 export type Role = 'user' | 'assistant';
 
@@ -111,6 +112,12 @@ export class Session {
     } finally {
       if (answer.length > 0) this.#history.push({ role: 'assistant', text: answer });
     }
+  }
+
+  /** null when this provider cannot report consumption. */
+  async usage(): Promise<UsageReport | null> {
+    if (!this.#model?.usage) return null;
+    return this.#model.usage();
   }
 
   /** null when this provider cannot enumerate models. */

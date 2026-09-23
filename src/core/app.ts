@@ -7,6 +7,7 @@ import type { ModelEvent, ToolAccess } from '../providers/provider.ts';
 import { PolarisError, toUserMessage } from './errors.ts';
 import { debug } from './logger.ts';
 import { Session } from './session.ts';
+import type { UsageReport } from './usage.ts';
 
 /**
  * What the UI is allowed to know. Every renderer — the Ink TUI today, a plain
@@ -365,6 +366,19 @@ export class PolarisApp {
 
   async setModel(id: string): Promise<void> {
     await this.#swap({ ...this.#config, model: id }, `model ${id}`);
+  }
+
+  /**
+   * Consumption as the active runtime measures it, or null when it measures
+   * none. Never throws: /status has other things to say.
+   */
+  async usage(): Promise<UsageReport | null> {
+    try {
+      return await this.#session.usage();
+    } catch (error) {
+      debug('app', 'usage unavailable', error);
+      return null;
+    }
   }
 
   /** null when the provider offers no discovery. */

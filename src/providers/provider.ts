@@ -1,3 +1,4 @@
+import type { UsageReport } from '../core/usage.ts';
 import type { PermissionGate } from '../permissions/gate.ts';
 import type { PermissionProfile } from '../permissions/policy.ts';
 
@@ -109,6 +110,12 @@ export interface ModelSession {
   setEffort?(effort: string): Promise<void>;
   /** What this session may do, once the runtime has been configured for it. */
   readonly access: ToolAccess;
+  /**
+   * Tokens, limits and cost as this runtime measures them. Optional, and may
+   * return null: a provider that cannot report consumption says so rather
+   * than returning zeroes that look like real measurements.
+   */
+  usage?(): Promise<UsageReport | null>;
   close(): Promise<void>;
 }
 

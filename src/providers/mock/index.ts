@@ -69,6 +69,10 @@ export const mockProvider: ModelProvider = {
     const registry = createRegistry(options.permissions, options.gate);
     const history: string[] = [];
     let calls = 0;
+    // Counted rather than invented: characters actually sent and echoed,
+    // divided by four. It is an estimate and says so, and it exists so the
+    // usage view can be exercised offline like everything else.
+    let tokens = { input: 0, output: 0 };
     let effort = options.effort ?? 'medium';
 
     return {
@@ -89,6 +93,7 @@ export const mockProvider: ModelProvider = {
       async *send(input, signal): AsyncIterable<ModelEvent> {
         signal?.throwIfAborted();
         history.push(input);
+        tokens = { ...tokens, input: tokens.input + Math.ceil(input.length / 4) };
         yield { type: 'message-start' };
 
         for (const [, kind, argument = ''] of input.matchAll(DIRECTIVE)) {
@@ -115,6 +120,7 @@ export const mockProvider: ModelProvider = {
         }
 
         const text = input.replace(DIRECTIVE, '').trim() || input;
+        tokens = { ...tokens, output: tokens.output + Math.ceil(text.length / 4) };
         for (const piece of chunks(text)) {
           signal?.throwIfAborted();
           yield { type: 'text-delta', text: piece };
@@ -123,6 +129,21 @@ export const mockProvider: ModelProvider = {
       },
       async listModels() {
         return ['echo', 'echo-uppercase'];
+      },
+      async usage() {
+        return {
+          plan: 'offline',
+          models: [
+            {
+              model: options.model ?? 'echo',
+              tokens,
+              contextWindow: 200_000,
+              contextUsed: tokens.input + tokens.output,
+            },
+          ],
+          limits: [{ name: 'pretend window', usedPercent: Math.min(100, history.length * 5) }],
+          note: 'The mock provider estimates tokens; nothing here is measured.',
+        };
       },
       async close() {
         history.length = 0;
