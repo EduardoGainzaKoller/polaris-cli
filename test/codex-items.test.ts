@@ -34,7 +34,12 @@ test('a read command is shown as Read with a workspace-relative path', () => {
     name: 'Read',
     target: 'src/main.ts',
   });
-  assert.deepEqual(itemCompleted(item), { type: 'tool-result', id: 'call_1', summary: '2 lines' });
+  assert.deepEqual(itemCompleted(item), {
+    type: 'tool-result',
+    id: 'call_1',
+    summary: '2 lines',
+    exitCode: 0,
+  });
 });
 
 test('search and listing commands are shown as Grep and List', () => {
@@ -51,18 +56,19 @@ test('search and listing commands are shown as Grep and List', () => {
     type: 'tool-result',
     id: 'call_1',
     summary: '3 matches',
+    exitCode: 0,
   });
 
   const list = command([{ type: 'listFiles', command: 'ls', path: null }]);
   assert.equal((itemStarted(list, CWD) as { name: string }).name, 'List');
 });
 
-test('an unclassified command is shown as Shell, shortened', () => {
+test('an unclassified command is shown as Run, shortened', () => {
   const item = command([{ type: 'unknown', command: 'x' }], {
     command: `node -e "${'x'.repeat(120)}"`,
   });
   const started = itemStarted(item, CWD) as { name: string; target: string };
-  assert.equal(started.name, 'Shell');
+  assert.equal(started.name, 'Run');
   assert.ok(started.target.length <= 80);
 });
 
@@ -73,6 +79,7 @@ test('failures, declines and non-zero exits become tool errors', () => {
     type: 'tool-error',
     id: 'call_1',
     error: 'exit code 2',
+    exitCode: 2,
   });
 });
 
@@ -88,6 +95,8 @@ test('an applied file change reports the paths and how much moved', () => {
     id: 'patch_1',
     name: 'Edit',
     target: 'src/main.ts',
+    // Announced up front, so Polaris keeps the original before the patch lands.
+    paths: [FILE],
   });
   assert.deepEqual(itemCompleted(change), {
     type: 'tool-result',
@@ -147,6 +156,7 @@ test('an unclassified Get-ChildItem on Windows is shown as List, not as the wrap
     type: 'tool-result',
     id: 'call_1',
     summary: '3 entries',
+    exitCode: 0,
   });
 });
 
@@ -184,7 +194,7 @@ test('a command nobody can classify shows the inner command, never the wrapper',
   assert.deepEqual(itemStarted(item, CWD), {
     type: 'tool-start',
     id: 'call_1',
-    name: 'Shell',
+    name: 'Run',
     target: 'node --version',
   });
 });

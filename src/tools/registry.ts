@@ -117,12 +117,20 @@ export class ToolRegistry {
     return this.#tools.get(name);
   }
 
-  /** Human name and target for a call about to run, without executing it. */
-  preview(name: string, input: unknown): { title: string; target: string } {
+  /**
+   * Human name and target for a call about to run, without executing it, and
+   * the file it will change when it is a write or an edit.
+   */
+  preview(
+    name: string,
+    input: unknown,
+  ): { title: string; target: string; paths?: readonly string[] } {
     const tool = this.#tools.get(name);
     if (!tool) return { title: name, target: '' };
     try {
-      return { title: tool.title, target: tool.target(tool.parse(input)) };
+      const target = tool.target(tool.parse(input));
+      const changes = tool.capability === 'write' || tool.capability === 'edit';
+      return { title: tool.title, target, ...(changes ? { paths: [target] } : {}) };
     } catch {
       return { title: tool.title, target: '' };
     }

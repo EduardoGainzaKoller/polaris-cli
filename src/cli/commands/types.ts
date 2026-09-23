@@ -6,6 +6,11 @@ export interface CommandContext {
   readonly canSelect: boolean;
   /** Ask the user to choose; null when they cancelled. */
   select(title: string, options: string[], current?: string | null): Promise<string | null>;
+  /**
+   * A yes/no question for something destructive. There is no default: only
+   * an explicit yes returns true.
+   */
+  confirm(question: string, details: readonly string[]): Promise<boolean>;
   /** Wipe the visible scrollback; session state is untouched. */
   clearScreen(): void;
   /** Ask the UI to shut down after this command finishes. */

@@ -9,7 +9,7 @@ Every operation that changes something is shown to you before it happens — the
 diff, the exact command — and waits for you to allow or deny it.
 
 ```text
- ✦ my-project                                                              v0.6.0
+ ✦ my-project                                                              v0.7.0
 
   ┃
   ┃ Añade validación a createUser y ejecuta los tests
@@ -312,6 +312,65 @@ Two details that matter if you compare the numbers with a bill:
   is holding right now. The second is the one that tells you how close you are to
   filling the window.
 
+## Changes, checkpoints and verification
+
+**Polaris preserves pre-existing user changes.** When a session starts it records the
+workspace as it found it: in a Git repository, the HEAD commit plus a private copy of
+every file you had already modified or left untracked. From then on the rule is time, not
+tools — what changes while a turn is running is Polaris's, whichever runtime or command
+did it (a Codex patch, a Claude `Edit`, a test run writing a snapshot); what changes while
+Polaris is idle is yours. So:
+
+- `/diff` shows **Changes this session** with their diffs, and lists your **Pre-existing
+  changes** separately, unexpanded. A file you had modified that Polaris then edited is
+  diffed against *your* version, not HEAD.
+- `/undo` restores only what Polaris changed, and puts a file you had modified back to
+  your version. It never runs `git reset`, `checkout`, `restore`, `clean` or `stash`.
+- A file you edit after Polaris last wrote it (in your IDE, say) is never overwritten:
+  undo skips it and says why. So is a file that changes while the confirmation is open.
+
+**Checkpoints are not Git commits.** `/checkpoint` copies only the files Polaris has
+changed into a temporary directory that belongs to the session, and `/undo` returns to
+the latest one (then the one before, down to the session start); `/undo cp-2` goes to a
+specific one. No commit, branch or stash is ever created, and the copies are deleted when
+Polaris exits. They are capped — 5 MB per file, 256 MB per session — and a checkpoint
+that could not restore a file refuses to be created rather than pretend. Undo asks for
+confirmation (`y`; Enter does nothing), writes atomically and respects the same workspace
+boundary as the tools, junctions and symlinks included.
+
+`/new` starts a new conversation on the same provider, model and profile, and touches no
+file. It also takes a new baseline: what the previous conversation changed now counts as
+your pre-existing work, so `/undo` in the new one cannot reach it. `/clear` only clears
+the screen, and `/undo` is the only one of the three that touches files.
+
+**Verification** is bookkeeping over the coding loop, not a separate agent. Every check
+the model runs (`npm test`, `./gradlew test`, `pytest`, `cargo test`, …) is recorded with
+the state of the workspace it saw, and any later change makes it stale. After a turn that
+changed files or ran checks, Polaris prints what it actually observed:
+
+```text
+  Verification
+  Changes
+    M src/UserService.ts
+  Checks
+    ✓ ./gradlew test
+  Workspace
+    ✓ no unexpected changes
+  Result    passed
+```
+
+A file nobody announced — written by a build or a test — is flagged as an unexpected
+change, not treated as an error. The status bar shows the branch, how many files Polaris
+changed and the verdict (`main +2 · unverified`, `verified`, `checks failed`). `/verify`
+asks the model to work out the project's own checks and run them; they go through the
+same permission gate as any other command. The model is also told to re-run checks after
+editing and to say "Implementation changed, but verification failed." when that is the
+truth — and the verification block shows the real result whatever the answer says.
+
+Outside Git, Polaris still works: `/status` says `git: not a repository`, and only files
+changed through a file tool (Polaris's own, Claude's `Write`/`Edit`, Codex patches) are
+tracked, captured just before each change.
+
 ## Commands
 
 | Command | Description |
@@ -324,6 +383,12 @@ Two details that matter if you compare the numbers with a bill:
 | `/effort [level]` | Reasoning effort (`low` … `max`, as the model allows) — changes live, the conversation is kept |
 | `/permissions [profile]` | Show the profiles, or switch to `read-only`, `ask` or `workspace-write` |
 | `/config [save]` | Show the configuration, or save provider, model, effort and permissions |
+| `/diff [file]` | What Polaris changed this session, with diffs; your pre-existing changes listed apart |
+| `/checkpoint [label]` | Save the current state of Polaris's changes |
+| `/checkpoints` | List this session's checkpoints |
+| `/undo [cp-N]` | Restore Polaris's changes to the latest (or a given) checkpoint, after confirming |
+| `/verify` | Have the model run the project's checks against the current changes |
+| `/new` | New conversation; same provider, model, permissions and files |
 | `/clear` | Clear the transcript (the provider keeps its conversation) |
 | `/exit` | Exit Polaris (`exit`, `quit`, `/q` also work) |
 
@@ -383,6 +448,7 @@ src/
   core/
     app.ts             PolarisApp — headless controller: transcript, status, switching
     session.ts         cwd, turn lifecycle over one provider session
+    verification.ts    which checks ran against which state of the workspace
     errors.ts          PolarisError = message safe to show the user
     logger.ts          debug logging (stderr, or a file while the TUI owns the terminal)
   cli/
@@ -395,7 +461,10 @@ src/
     claude/            Claude Agent SDK runtime
     codex/             Codex App Server (JSON-RPC over stdio)
       app-server.ts    the process + protocol seam; tests replace it wholesale
-  tools/               Read / Glob / Grep, the workspace boundary and every limit
+  tools/               file and command tools, the workspace boundary and every limit
+  workspace/
+    git.ts             read-only Git: status (porcelain v2), files at a commit
+    changes.ts         ChangeTracker: baseline, session changes, checkpoints, undo
   config/config.ts     ~/.polaris/config.json
   ui/
     tui/               Ink components: App, Composer, Selector
@@ -453,8 +522,11 @@ These rules keep this able to grow:
 7. **Commands are data, not control flow**, and **user output is separate from debug
    logging** (`ui/` on stdout, `logger.ts` on stderr).
 
-Writing files, running commands, git operations, a permission system, Markdown rendering
-and persistent history are deliberately *not* here yet.
+Git awareness lives in the core, not in any provider: runtimes report what they did as
+tool events, and the change tracker checks the workspace itself, so a native Codex or
+Claude edit is found the same way as one of Polaris's own. Git mutations (add, commit,
+branch, push, stash), Markdown rendering and persistent history are deliberately *not*
+here yet.
 
 ## Scripts
 

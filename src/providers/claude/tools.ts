@@ -221,6 +221,7 @@ export class ClaudeToolTranslator {
         id: block.id,
         name: label(name),
         target: targetOf(name, block.input, this.#cwd),
+        ...changedPath(name, block.input),
       });
     }
     return events;
@@ -254,6 +255,14 @@ export class ClaudeToolTranslator {
     }
     return events;
   }
+}
+
+/** The file a native Write or Edit is about to change, in the event's terms. */
+function changedPath(name: string, input: unknown): { paths?: readonly string[] } {
+  if (!['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(name)) return {};
+  const value = (input ?? {}) as Record<string, unknown>;
+  const path = value.file_path ?? value.notebook_path;
+  return typeof path === 'string' ? { paths: [path] } : {};
 }
 
 function isDenial(message: string): boolean {

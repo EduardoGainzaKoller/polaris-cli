@@ -13,11 +13,13 @@ import {
   parseMouse,
   statusLabel,
   transcriptLines,
+  workspaceLabel,
 } from '../layout.ts';
 import { shortenPath } from '../output.ts';
 import { palette } from '../theme.ts';
 import { Approval } from './Approval.tsx';
 import { Composer } from './Composer.tsx';
+import { Confirm } from './Confirm.tsx';
 import { Home } from './Home.tsx';
 import { Selector } from './Selector.tsx';
 import { useSpinner } from './Spinner.tsx';
@@ -41,6 +43,12 @@ interface Pending {
   readonly resolve: (value: string | null) => void;
 }
 
+interface Asking {
+  readonly question: string;
+  readonly details: readonly string[];
+  readonly resolve: (yes: boolean) => void;
+}
+
 export interface AppProps {
   readonly app: PolarisApp;
   readonly registry: CommandRegistry;
@@ -59,6 +67,7 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
   const [draft, setDraft] = useState('');
   const [composerHeight, setComposerHeight] = useState(4);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [asking, setAsking] = useState<Asking | null>(null);
   const [history, setHistory] = useState<readonly string[]>(initialHistory);
 
   // One subscription, coalesced through React's own batching: a fast stream
@@ -80,7 +89,8 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
   );
 
   const approval = state.approval;
-  const home = state.messages.length === 0 && pending === null && approval === null;
+  const home =
+    state.messages.length === 0 && pending === null && approval === null && asking === null;
   const bodyWidth = Math.max(20, size.columns - 6);
   const lines = useMemo(
     () => transcriptLines(state.messages, bodyWidth),
@@ -140,6 +150,8 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
               new Promise<string | null>((resolve) =>
                 setPending({ title, options, current: current ?? null, resolve }),
               ),
+            confirm: (question, details) =>
+              new Promise<boolean>((resolve) => setAsking({ question, details, resolve })),
             clearScreen: () => setScroll(0),
             requestExit: exit,
           },
@@ -160,7 +172,7 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
     if (mouse.isMouse) return scrollBy(mouse.scroll);
     // While an approval is open the card has the keyboard, so no other binding
     // can be mistaken for an answer to it.
-    if (approval) return;
+    if (approval || asking) return;
     if (key.pageUp) return scrollBy(transcriptHeight - 1);
     if (key.pageDown) return scrollBy(-(transcriptHeight - 1));
     if ((key.shift || key.ctrl) && key.upArrow) return scrollBy(1);
@@ -171,7 +183,7 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
   const composer = (
     <Composer
       width={home ? Math.min(size.columns - 2, 88) : size.columns - 2}
-      isActive={pending === null && approval === null}
+      isActive={pending === null && approval === null && asking === null}
       busy={state.busy}
       commands={commands}
       history={history}
@@ -189,8 +201,12 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
     />
   );
 
-  const where = shortenPath(state.cwd);
-  const hintsWidth = Math.max(0, size.columns - where.length - 24);
+  // Narrow terminals lose the path first; the status and the workspace
+  // indicator are what a glance at the footer is for.
+  const workspace = workspaceLabel(state.workspace);
+  const fullPath = shortenPath(state.cwd);
+  const where = size.columns - workspace.length - fullPath.length >= 60 ? fullPath : '';
+  const hintsWidth = Math.max(0, size.columns - where.length - workspace.length - 28);
 
   return (
     <Box
@@ -217,7 +233,20 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
         overflow="hidden"
         justifyContent={home ? 'center' : 'flex-end'}
       >
-        {pending ? (
+        {asking ? (
+          <Box justifyContent="center" alignItems="center" flexGrow={1}>
+            <Confirm
+              question={asking.question}
+              details={asking.details}
+              width={Math.min(76, size.columns - 6)}
+              onAnswer={(yes) => {
+                const { resolve } = asking;
+                setAsking(null);
+                resolve(yes);
+              }}
+            />
+          </Box>
+        ) : pending ? (
           <Box justifyContent="center" alignItems="center" flexGrow={1}>
             <Selector
               title={pending.title}
@@ -286,7 +315,10 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
             {`● ${statusLabel(state.status)}`}
           </Text>
         )}
-        <Text color={palette.subtle}>{`   ${where}`}</Text>
+        {where ? <Text color={palette.subtle}>{`   ${where}`}</Text> : null}
+        {workspace ? (
+          <Text color={verificationColor(state.workspace.verification)}>{`   ${workspace}`}</Text>
+        ) : null}
         <Box flexGrow={1} />
         <Text color={palette.subtle} wrap="truncate-end">
           {footerHints(hintsWidth, state.busy, approval !== null)}
@@ -310,6 +342,13 @@ function diffRowsFor(
   const wanted = approval.diff.split('\n').length;
   const room = budget - APPROVAL_CHROME - (approval.facts?.length ?? 0);
   return Math.max(0, Math.min(wanted, room, MAX_CARD_DIFF_ROWS));
+}
+
+function verificationColor(state: AppState['workspace']['verification']): string {
+  if (state === 'verified') return palette.success;
+  if (state === 'failed') return palette.error;
+  if (state === 'unverified' || state === 'incomplete') return palette.warning;
+  return palette.subtle;
 }
 
 function terminalSize(): { columns: number; rows: number } {

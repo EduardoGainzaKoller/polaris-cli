@@ -95,7 +95,11 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
       await runRepl(app);
     }
   } finally {
+    // Changes Polaris made are kept, never reverted on the way out; the user
+    // just gets told what is still there.
+    const summary = app.exitSummary();
     await app.close();
+    if (summary) ui.line(summary);
   }
   return 0;
 }

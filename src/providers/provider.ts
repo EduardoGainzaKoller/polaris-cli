@@ -44,6 +44,12 @@ export type ModelEvent =
       /** Human name: Read, Glob, Grep, Write, Edit, Run… */
       readonly name: string;
       readonly target: string;
+      /**
+       * Files this call is about to change, when the runtime says so up front
+       * (a write, an edit, a patch). Polaris keeps their originals before the
+       * change lands; changes nobody announced are still found afterwards.
+       */
+      readonly paths?: readonly string[];
     }
   | {
       /**
@@ -55,11 +61,18 @@ export type ModelEvent =
       readonly id: string;
       readonly text: string;
     }
-  | { readonly type: 'tool-result'; readonly id: string; readonly summary: string }
+  | {
+      readonly type: 'tool-result';
+      readonly id: string;
+      readonly summary: string;
+      /** A command's exit code, when the runtime reports one. */
+      readonly exitCode?: number;
+    }
   | {
       readonly type: 'tool-error';
       readonly id: string;
       readonly error: string;
+      readonly exitCode?: number;
       /** A person refused it, rather than it going wrong. */
       readonly denied?: boolean;
     }

@@ -119,7 +119,7 @@ export const writeFileTool: ToolDefinition<WriteFileInput> = {
  * is removed first — a smaller window than writing in place, which is all
  * this is meant to buy. Anything more is a transaction log.
  */
-export async function writeAtomically(file: string, content: string): Promise<void> {
+export async function writeAtomically(file: string, content: string | Uint8Array): Promise<void> {
   const temporary = `${file}.polaris-${process.pid}-${Date.now()}.tmp`;
   try {
     await writeFile(temporary, content, 'utf8');

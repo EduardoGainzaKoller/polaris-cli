@@ -11,12 +11,20 @@ export function toolStarted(
   name: string,
   input: unknown,
 ): ModelEvent {
-  const { title, target } = registry.preview(name, input);
-  return { type: 'tool-start', id, name: title, target };
+  const { title, target, paths } = registry.preview(name, input);
+  return { type: 'tool-start', id, name: title, target, ...(paths ? { paths } : {}) };
 }
 
 export function toolFinished(id: string, result: ToolCallResult): ModelEvent {
-  if (result.ok) return { type: 'tool-result', id, summary: result.output.summary };
+  if (result.ok) {
+    const { exitCode } = result.output.metadata;
+    return {
+      type: 'tool-result',
+      id,
+      summary: result.output.summary,
+      ...(typeof exitCode === 'number' ? { exitCode } : {}),
+    };
+  }
   return {
     type: 'tool-error',
     id,

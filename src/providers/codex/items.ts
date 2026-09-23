@@ -59,7 +59,19 @@ export function isToolItem(item: unknown): item is Item {
 
 export function itemStarted(item: Item, cwd: string): ModelEvent {
   const { name, target } = describe(item, cwd);
-  return { type: 'tool-start', id: item.id as string, name, target };
+  const paths =
+    item.type === 'fileChange'
+      ? ((Array.isArray(item.changes) ? item.changes : []) as Array<{ path?: string }>)
+          .map((change) => change.path)
+          .filter((path): path is string => typeof path === 'string' && path !== '')
+      : [];
+  return {
+    type: 'tool-start',
+    id: item.id as string,
+    name,
+    target,
+    ...(paths.length > 0 ? { paths } : {}),
+  };
 }
 
 export function itemCompleted(item: Item): ModelEvent {
@@ -69,15 +81,28 @@ export function itemCompleted(item: Item): ModelEvent {
   if (status === 'declined') {
     return { type: 'tool-error', id, error: 'Declined by the user.', denied: true };
   }
-  if (status === 'failed') return { type: 'tool-error', id, error: failure(item) };
+  if (status === 'failed') {
+    const exitCode = item.exitCode;
+    return {
+      type: 'tool-error',
+      id,
+      error: failure(item),
+      ...(typeof exitCode === 'number' ? { exitCode } : {}),
+    };
+  }
   if (item.type === 'fileChange') return { type: 'tool-result', id, summary: changeSummary(item) };
 
   if (item.type === 'commandExecution') {
     const exitCode = item.exitCode;
     if (typeof exitCode === 'number' && exitCode !== 0) {
-      return { type: 'tool-error', id, error: `exit code ${exitCode}` };
+      return { type: 'tool-error', id, error: `exit code ${exitCode}`, exitCode };
     }
-    return { type: 'tool-result', id, summary: commandSummary(item) };
+    return {
+      type: 'tool-result',
+      id,
+      summary: commandSummary(item),
+      ...(typeof exitCode === 'number' ? { exitCode } : {}),
+    };
   }
   return { type: 'tool-result', id, summary: 'done' };
 }
@@ -101,7 +126,9 @@ function describe(item: Item, cwd: string): { name: string; target: string } {
         };
       }
       // The inner command when Codex reported one, never the shell wrapper around it.
-      return { name: 'Shell', target: shorten(action?.command ?? String(item.command ?? '')) };
+      // `Run`, like every other runtime's command tool, so the core can tell
+      // a command from a read without knowing which runtime ran it.
+      return { name: 'Run', target: shorten(action?.command ?? String(item.command ?? '')) };
     }
     case 'fileChange':
       return { name: 'Edit', target: changedPaths(item, cwd) };

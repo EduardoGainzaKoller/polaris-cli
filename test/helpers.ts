@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { PermissionGate } from '../src/permissions/gate.ts';
 import { DEFAULT_PROFILE, type PermissionProfile } from '../src/permissions/policy.ts';
 import type { ProviderSessionOptions, ToolAccess } from '../src/providers/provider.ts';
@@ -47,3 +51,32 @@ export const TEST_ACCESS: ToolAccess = {
 };
 
 export { PERMISSION_PROFILES } from '../src/permissions/policy.ts';
+
+/** Runs Git in a test fixture. Tests only ever point it at throwaway directories. */
+export function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+/**
+ * A throwaway repository on branch `main` with one commit holding `files`.
+ * Line-ending conversion is off so the bytes on disk are the bytes committed.
+ */
+export async function makeRepo(files: Record<string, string>): Promise<string> {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'polaris-git-')));
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'config', 'user.email', 'polaris@example.invalid');
+  git(dir, 'config', 'user.name', 'Polaris Test');
+  git(dir, 'config', 'core.autocrlf', 'false');
+  git(dir, 'config', 'commit.gpgsign', 'false');
+  await writeFiles(dir, files);
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'initial');
+  return dir;
+}
+
+export async function writeFiles(dir: string, files: Record<string, string>): Promise<void> {
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(dirname(join(dir, path)), { recursive: true });
+    await writeFile(join(dir, path), content);
+  }
+}

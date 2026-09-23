@@ -452,7 +452,12 @@ test('sandboxed commands in a turn surface as tool events before the answer', as
     name: 'Grep',
     target: '"ModelProvider"',
   });
-  assert.deepEqual(events[2], { type: 'tool-result', id: 'call_1', summary: '1 match' });
+  assert.deepEqual(events[2], {
+    type: 'tool-result',
+    id: 'call_1',
+    summary: '1 match',
+    exitCode: 0,
+  });
   await session.close();
 });
 

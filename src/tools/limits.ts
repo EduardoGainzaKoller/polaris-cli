@@ -57,3 +57,16 @@ export const COMMAND_OUTPUT_HEAD_LINES = 60;
 
 /** Output lines kept from the end — where a failure usually is. */
 export const COMMAND_OUTPUT_TAIL_LINES = 120;
+
+/**
+ * Largest file a checkpoint copies. A bigger one is still tracked by size and
+ * modification time, but cannot be restored, and a checkpoint that would need
+ * to copy it refuses rather than pretending to protect it.
+ */
+export const MAX_SNAPSHOT_FILE_BYTES = 5 * 1024 * 1024;
+
+/** Total bytes one session may copy into its checkpoint store. */
+export const MAX_CHECKPOINT_STORE_BYTES = 256 * 1024 * 1024;
+
+/** Diff lines `/diff` prints before cutting; the file list is never cut. */
+export const MAX_SESSION_DIFF_LINES = 400;

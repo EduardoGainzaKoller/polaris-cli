@@ -1,4 +1,4 @@
-import type { AppState, AppStatus, UiMessage } from '../core/app.ts';
+import type { AppState, AppStatus, UiMessage, WorkspaceState } from '../core/app.ts';
 import { shortenPath } from './output.ts';
 
 /** Pure layout maths — no ANSI, no Ink — so it can be unit-tested directly. */
@@ -175,6 +175,25 @@ export function statusSegments(state: AppState, width: number): { left: string; 
     return { left: full, right: status };
   }
   return { left: `${state.provider} · ${status}`, right: '' };
+}
+
+/**
+ * The workspace in a few characters: branch and how many files Polaris has
+ * changed, then whether those changes are verified. `main +2 · unverified`.
+ * Empty when there is nothing worth a glance.
+ */
+export function workspaceLabel(workspace: WorkspaceState): string {
+  const changed = workspace.changed > 0 ? `+${workspace.changed}` : '';
+  const where = workspace.git
+    ? [workspace.git.branch ?? 'detached', changed].filter(Boolean).join(' ')
+    : changed;
+  const verification =
+    workspace.verification === 'none'
+      ? ''
+      : workspace.verification === 'failed'
+        ? 'checks failed'
+        : workspace.verification;
+  return [where, verification].filter(Boolean).join(' · ');
 }
 
 /** Commands offered while the composer holds a `/…` prefix. */

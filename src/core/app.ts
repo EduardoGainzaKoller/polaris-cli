@@ -4,10 +4,26 @@ import type { ApprovalDecision, ApprovalRequest } from '../permissions/gate.ts';
 import { PermissionGate } from '../permissions/gate.ts';
 import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
 import type { ModelEvent, ToolAccess } from '../providers/provider.ts';
+import {
+  ChangeTracker,
+  type Checkpoint,
+  type FileChange,
+  type FileDiff,
+  type PreexistingChange,
+  type UndoPlan,
+  type UndoResult,
+} from '../workspace/changes.ts';
 import { PolarisError, toUserMessage } from './errors.ts';
 import { debug } from './logger.ts';
 import { Session } from './session.ts';
 import type { UsageReport } from './usage.ts';
+import {
+  RESULT_LABEL,
+  type VerificationState,
+  Verifier,
+  verificationLines,
+  verifyPrompt,
+} from './verification.ts';
 
 /**
  * What the UI is allowed to know. Every renderer — the Ink TUI today, a plain
@@ -53,6 +69,17 @@ export interface UiMessage {
   readonly meta?: string;
 }
 
+/** What the UI shows about the workspace itself, never about a provider. */
+export interface WorkspaceState {
+  /** null outside a Git repository. */
+  readonly git: { readonly branch: string | null; readonly head: string | null } | null;
+  /** Files Polaris has changed this session. */
+  readonly changed: number;
+  /** Files the user had changed, which Polaris leaves alone. */
+  readonly preexisting: number;
+  readonly verification: VerificationState;
+}
+
 export interface AppState {
   readonly cwd: string;
   readonly project: string;
@@ -73,6 +100,7 @@ export interface AppState {
    * runtime asked.
    */
   readonly approval: ApprovalRequest | null;
+  readonly workspace: WorkspaceState;
 }
 
 /**
@@ -94,6 +122,9 @@ export class PolarisApp {
   readonly #gate: PermissionGate;
   #approval: { request: ApprovalRequest; answer: (decision: ApprovalDecision) => void } | null =
     null;
+  /** null until `start`. */
+  #tracker: ChangeTracker | null = null;
+  readonly #verifier = new Verifier();
 
   constructor(options: { cwd: string; config: PolarisConfig; approvals?: boolean }) {
     this.cwd = options.cwd;
@@ -160,6 +191,18 @@ export class PolarisApp {
       effort: this.#session.effortId,
       permissions: this.#gate.profile,
       approval: this.#approval?.request ?? null,
+      workspace: this.#workspace(),
+    };
+  }
+
+  #workspace(): WorkspaceState {
+    const changes = this.#tracker?.changes() ?? [];
+    const git = this.#tracker?.git;
+    return {
+      git: git ? { branch: git.branch, head: git.head } : null,
+      changed: changes.length,
+      preexisting: this.#tracker?.preexisting().length ?? 0,
+      verification: this.#verifier.state(changes.length > 0),
     };
   }
 
@@ -174,6 +217,7 @@ export class PolarisApp {
 
   async start(): Promise<void> {
     await this.#session.start();
+    this.#tracker = await ChangeTracker.start(this.cwd);
     this.#emit();
   }
 
@@ -184,6 +228,10 @@ export class PolarisApp {
    * transcript reads in the order things actually happened.
    */
   async submit(text: string): Promise<void> {
+    await this.#run(text, false);
+  }
+
+  async #run(text: string, report: boolean): Promise<void> {
     if (this.#turn) return;
     this.#append('user', text, 'complete');
 
@@ -191,6 +239,11 @@ export class PolarisApp {
     this.#turn = controller;
     this.#set('thinking');
     const startedAt = Date.now();
+    // Whatever changed while Polaris was idle is the user's, and is set aside
+    // before the turn can be blamed for it.
+    await this.#observe('user');
+    const revision = this.#verifier.revision;
+    let checked = false;
 
     let answer: string | null = null;
     /** The last answer of the turn, which gets the model and timing footer. */
@@ -216,6 +269,12 @@ export class PolarisApp {
           }
           case 'tool-start': {
             seal('complete');
+            // Originals are kept before the change lands, which matters for
+            // files Git does not track and outside Git altogether.
+            if (event.paths) await this.#capture(event.paths);
+            if (event.name === 'Run' && this.#verifier.started(event.id, event.target)) {
+              checked = true;
+            }
             const entry = this.#appendTool(event);
             running.set(event.id, { entry, name: event.name });
             this.#set(activity(running));
@@ -227,10 +286,26 @@ export class PolarisApp {
             break;
           }
           case 'tool-result':
-          case 'tool-error':
+          case 'tool-error': {
+            const check = this.#verifier.isRunning(event.id);
+            if (check) {
+              const passed = event.type === 'tool-result' && (event.exitCode ?? 0) === 0;
+              const denied = event.type === 'tool-error' && event.denied === true;
+              this.#verifier.finished(
+                event.id,
+                passed ? 'passed' : denied ? 'denied' : 'failed',
+                event.exitCode,
+              );
+            }
+            const name = running.get(event.id)?.name ?? '';
             this.#finishTool(running, event);
+            // What a check writes (snapshots, reports) is flagged as
+            // unexpected, but does not make the check stale by existing.
+            // Reads cannot change anything, so they cost no Git call.
+            if (!READS.has(name)) await this.#observe('polaris', check);
             this.#set(running.size > 0 ? activity(running) : 'thinking');
             break;
+          }
         }
       }
       seal('complete');
@@ -254,9 +329,138 @@ export class PolarisApp {
         this.#set('error');
       }
     } finally {
+      this.#verifier.cancelRunning();
+      await this.#observe('polaris');
       this.#turn = null;
+      if (report || checked || this.#verifier.revision !== revision) {
+        this.notice(['Verification', ...this.verificationLines()].join('\n'));
+      }
       this.#emit();
     }
+  }
+
+  /** The verification block for the current state. */
+  verificationLines(): string[] {
+    const changes = this.#tracker?.changes() ?? [];
+    return verificationLines(
+      changes,
+      this.#verifier.checks(),
+      this.#verifier.state(changes.length > 0),
+    );
+  }
+
+  /**
+   * `/verify`: the model works out this project's checks and runs them —
+   * through the same permission gate as any other command — and Polaris
+   * reports what actually happened, whatever the answer says.
+   */
+  async verify(): Promise<void> {
+    this.#idle();
+    await this.#observe('user');
+    await this.#run(verifyPrompt(this.#tracker?.changes() ?? []), true);
+  }
+
+  /** Session changes and the user's own, as of now. */
+  async changes(): Promise<{ changes: FileChange[]; preexisting: PreexistingChange[] }> {
+    if (!this.#turn) await this.#observe('user');
+    return {
+      changes: this.#tracker?.changes() ?? [],
+      preexisting: this.#tracker?.preexisting() ?? [],
+    };
+  }
+
+  async diff(change: FileChange): Promise<FileDiff> {
+    return this.#requireTracker().diff(change);
+  }
+
+  get checkpoints(): readonly Checkpoint[] {
+    return this.#tracker?.checkpoints ?? [];
+  }
+
+  async checkpoint(label?: string): Promise<Checkpoint> {
+    this.#idle();
+    const tracker = this.#requireTracker();
+    await this.#observe('user');
+    return tracker.checkpoint(label);
+  }
+
+  /** What `/undo` would restore and skip; touches nothing. */
+  async planUndo(id?: string): Promise<UndoPlan> {
+    this.#idle();
+    const tracker = this.#requireTracker();
+    await this.#observe('user');
+    return tracker.planUndo(id);
+  }
+
+  async undo(plan: UndoPlan): Promise<UndoResult> {
+    this.#idle();
+    const result = await this.#requireTracker().undo(plan);
+    if (result.restored.length > 0) this.#verifier.mutated();
+    this.#emit();
+    return result;
+  }
+
+  /**
+   * `/new`: a fresh conversation on the same provider, model, effort and
+   * profile. Files are not touched. The change baseline is retaken here, so
+   * what the previous conversation changed is from now on treated like the
+   * user's own pre-existing work: `/undo` in the new one cannot reach it.
+   */
+  async newConversation(): Promise<void> {
+    this.#idle();
+    await this.#swap(
+      this.#config,
+      'conversation',
+      'New conversation. Same provider, model and permissions; files untouched.',
+    );
+    const previous = this.#tracker;
+    this.#tracker = await ChangeTracker.start(this.cwd);
+    this.#verifier.reset();
+    await previous?.dispose();
+    this.#emit();
+  }
+
+  /** A few lines for the terminal after exit, or null when Polaris changed nothing. */
+  exitSummary(): string | null {
+    const changes = this.#tracker?.changes() ?? [];
+    if (changes.length === 0) return null;
+    const state = this.#verifier.state(true);
+    return [
+      'Session ended.',
+      `  Changes kept: ${changes.length} ${changes.length === 1 ? 'file' : 'files'}`,
+      `  Verification: ${RESULT_LABEL[state]}`,
+    ].join('\n');
+  }
+
+  async #observe(owner: 'polaris' | 'user', fromCheck = false): Promise<void> {
+    if (!this.#tracker) return;
+    try {
+      const changed = await this.#tracker.reconcile(owner);
+      if (owner === 'polaris' && changed.length > 0 && !fromCheck) this.#verifier.mutated();
+    } catch (error) {
+      // Tracking is a safety net for undo; it must never break a turn.
+      debug('app', 'workspace reconcile failed', error);
+    }
+    this.#emit();
+  }
+
+  async #capture(paths: readonly string[]): Promise<void> {
+    try {
+      await this.#tracker?.capture(paths);
+    } catch (error) {
+      debug('app', 'capture failed', error);
+    }
+  }
+
+  #idle(): void {
+    if (this.#turn) {
+      throw new PolarisError('Wait for the current turn to finish, or press Ctrl+C to cancel it.');
+    }
+  }
+
+  #requireTracker(): ChangeTracker {
+    if (!this.#tracker) throw new PolarisError('The workspace is not being tracked.');
+    return this.#tracker;
   }
 
   #appendTool(event: Extract<ModelEvent, { type: 'tool-start' }>): string {
@@ -399,13 +603,14 @@ export class PolarisApp {
   async close(): Promise<void> {
     this.#turn?.abort();
     await this.#session.close();
+    await this.#tracker?.dispose();
   }
 
   /**
    * Starts a replacement session and only then retires the old one, so a failed
    * switch leaves the working session untouched.
    */
-  async #swap(config: PolarisConfig, what: string): Promise<void> {
+  async #swap(config: PolarisConfig, what: string, notice?: string): Promise<void> {
     const previous = this.#session;
     this.#set('switching');
     const next = new Session({ cwd: this.cwd, config, gate: this.#gate });
@@ -422,7 +627,8 @@ export class PolarisApp {
     this.#session = next;
     await previous.close().catch((error: unknown) => debug('app', 'closing old session', error));
     this.notice(
-      `Switched to ${next.providerId} · ${next.modelId} · ${config.permissions}. New conversation context.`,
+      notice ??
+        `Switched to ${next.providerId} · ${next.modelId} · ${config.permissions}. New conversation context.`,
     );
     this.#set('ready');
   }
@@ -451,6 +657,9 @@ export class PolarisApp {
     for (const listener of this.#listeners) listener(state);
   }
 }
+
+/** Tools that only look; the turn-end reconcile still catches anything they missed. */
+const READS = new Set(['Read', 'Grep', 'Glob', 'List']);
 
 /** Live tool output lines kept in the transcript while a command runs. */
 const MAX_LIVE_OUTPUT_LINES = 8;

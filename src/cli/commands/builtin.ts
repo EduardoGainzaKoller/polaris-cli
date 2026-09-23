@@ -1,5 +1,7 @@
 import { configPath, saveConfig } from '../../config/config.ts';
+import type { AppState } from '../../core/app.ts';
 import { usageLines } from '../../core/usage.ts';
+import { RESULT_LABEL } from '../../core/verification.ts';
 import {
   decide,
   isProfile,
@@ -7,6 +9,7 @@ import {
   PROFILE_SUMMARY,
 } from '../../permissions/policy.ts';
 import { listProviders } from '../../providers/provider.ts';
+import { MAX_SESSION_DIFF_LINES } from '../../tools/limits.ts';
 import { capabilityOf } from '../../tools/registry.ts';
 import { shortenPath } from '../../ui/output.ts';
 import type { CommandRegistry } from './registry.ts';
@@ -44,6 +47,8 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
           ...(usage?.plan ? [`  plan      ${usage.plan}`] : []),
           `  turns     ${state.turns}`,
           `  session   ${state.status === 'error' ? 'error' : 'active'}`,
+          '',
+          ...workspaceRows(state.workspace),
         ];
 
         // Every runtime measures something different, and one of them may
@@ -205,6 +210,145 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       },
     },
     {
+      name: 'diff',
+      summary: 'Show what Polaris changed this session: /diff [file]',
+      run: async ({ app }, args) => {
+        const { changes, preexisting } = await app.changes();
+        const only = args[0]?.replaceAll('\\', '/').replace(/^\.\//, '');
+        const shown = only ? changes.filter((change) => change.path === only) : changes;
+        if (only && shown.length === 0) {
+          app.notice(`${only} has no changes from this session.`);
+          return;
+        }
+        const diffs = [];
+        for (const change of shown) diffs.push({ change, diff: await app.diff(change) });
+
+        const lines = ['  Changes this session'];
+        if (changes.length === 0) lines.push('    none');
+        for (const { change, diff } of diffs) {
+          const stat = diff.text.startsWith('Binary')
+            ? 'binary'
+            : `+${diff.added} -${diff.removed}`;
+          const notes = [
+            change.kind === 'modified' ? '' : change.kind,
+            change.preexisting ? 'on top of your changes' : '',
+            change.unexpected ? 'not written by a file tool' : '',
+            change.external ? 'changed outside Polaris since' : '',
+          ].filter(Boolean);
+          lines.push(`    ${change.path}  ${stat}${notes.length ? `  (${notes.join(', ')})` : ''}`);
+        }
+        if (preexisting.length > 0) {
+          lines.push('', '  Pre-existing changes (yours; Polaris leaves them alone)');
+          for (const item of preexisting.slice(0, 20)) lines.push(`    ${item.path}`);
+          if (preexisting.length > 20) lines.push(`    … ${preexisting.length - 20} more`);
+        }
+        if (!app.state.workspace.git) {
+          lines.push('', '  Not a Git repository: only files changed by file tools are tracked.');
+        }
+
+        let budget = MAX_SESSION_DIFF_LINES;
+        for (const { diff } of diffs) {
+          const body = diff.text.split('\n');
+          if (budget <= 0) {
+            lines.push('', `  … diff truncated: ${diffs.length} files changed. Use /diff <file>.`);
+            break;
+          }
+          lines.push(
+            '',
+            `  ── ${diff.path} ──`,
+            ...body.slice(0, budget).map((line) => `  ${line}`),
+          );
+          if (body.length > budget) lines.push(`  … ${body.length - budget} more lines`);
+          budget -= body.length;
+        }
+        app.notice(lines.join('\n'));
+      },
+    },
+    {
+      name: 'checkpoint',
+      summary: 'Save the current state of Polaris’s changes: /checkpoint [label]',
+      run: async ({ app }, args) => {
+        const checkpoint = await app.checkpoint(args.join(' '));
+        app.notice(
+          `Checkpoint created: ${checkpoint.id} (${checkpoint.label}). /undo returns here.`,
+        );
+      },
+    },
+    {
+      name: 'checkpoints',
+      summary: 'List this session’s checkpoints',
+      run({ app }) {
+        const checkpoints = app.checkpoints;
+        const width = Math.max(...checkpoints.map((checkpoint) => checkpoint.label.length), 12);
+        app.notice(
+          [
+            '  Checkpoints',
+            ...checkpoints.map(
+              (checkpoint, index) =>
+                `  ${checkpoint.id.padEnd(6)} ${checkpoint.label.padEnd(width)}  ${time(checkpoint.at)}${index === checkpoints.length - 1 ? '  latest' : ''}`,
+            ),
+            '',
+            '  Checkpoints live only for this session; they are not Git commits.',
+          ].join('\n'),
+        );
+      },
+    },
+    {
+      name: 'undo',
+      summary: 'Restore Polaris’s changes to the latest checkpoint: /undo [cp-N]',
+      run: async (context, args) => {
+        const { app } = context;
+        const id = args.find((arg) => arg !== '--yes');
+        const plan = await app.planUndo(id);
+        const { checkpoint } = plan;
+        const skipped = plan.skipped.map(
+          (item) => `Cannot safely restore ${item.path}: ${item.reason}.`,
+        );
+        if (plan.restore.length === 0) {
+          app.notice(
+            skipped.length > 0
+              ? skipped.join('\n')
+              : `Nothing to undo: Polaris has changed nothing since ${checkpoint.id} (${checkpoint.label}).`,
+          );
+          return;
+        }
+        const confirmed =
+          args.includes('--yes') ||
+          (await context.confirm(`Undo changes since ${checkpoint.id} (${checkpoint.label})?`, [
+            ...plan.restore.map((item) => item.path),
+            ...plan.skipped.map((item) => `${item.path} — left alone: ${item.reason}`),
+          ]));
+        if (!confirmed) {
+          app.notice('Undo cancelled. Nothing was changed.');
+          return;
+        }
+        const result = await app.undo(plan);
+        app.notice(
+          [
+            `Restored ${result.restored.length} ${result.restored.length === 1 ? 'file' : 'files'} to ${checkpoint.id}.`,
+            ...result.restored.map((path) => `  ${path}`),
+            ...result.skipped.map((item) => `Cannot safely restore ${item.path}: ${item.reason}.`),
+          ].join('\n'),
+        );
+      },
+    },
+    {
+      name: 'new',
+      blockedByApproval: true,
+      summary: 'Start a new conversation (same provider, model, permissions and files)',
+      run: async ({ app }) => {
+        await app.newConversation();
+      },
+    },
+    {
+      name: 'verify',
+      blockedByApproval: true,
+      summary: 'Run this project’s checks against the current changes',
+      run: async ({ app }) => {
+        await app.verify();
+      },
+    },
+    {
       name: 'clear',
       summary: 'Clear the transcript (keeps the session)',
       run({ app, clearScreen }) {
@@ -221,6 +365,22 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       },
     },
   ];
+}
+
+/** The Git and verification rows of /status. */
+function workspaceRows(workspace: AppState['workspace']): string[] {
+  const git = workspace.git;
+  return [
+    git
+      ? `  git       ${git.branch ?? 'detached'}${git.head ? ` @ ${git.head.slice(0, 7)}` : ' (no commits)'}`
+      : '  git       not a repository',
+    `  changes   ${workspace.changed} by Polaris · ${workspace.preexisting} pre-existing`,
+    `  checks    ${RESULT_LABEL[workspace.verification]}`,
+  ];
+}
+
+function time(date: Date): string {
+  return date.toTimeString().slice(0, 5);
 }
 
 /** Uses the argument when given, otherwise the UI's picker, otherwise explains how. */

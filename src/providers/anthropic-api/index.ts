@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
+import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
 import type { PermissionProfile } from '../../permissions/policy.ts';
 import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
 import { toolFinished, toolResultText, toolStarted } from '../../tools/events.ts';
@@ -63,6 +64,7 @@ function systemPrompt(profile: PermissionProfile): string {
     'If the user refuses an operation, do not repeat it: explain what you wanted to do or',
     'suggest an alternative. A non-zero exit code from run_command is information, not a',
     'failure of the tool — read the output and decide what to do next.',
+    COMPLETION_GUIDANCE,
   ].join(' ');
 }
 

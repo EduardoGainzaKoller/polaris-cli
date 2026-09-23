@@ -8,6 +8,7 @@ import {
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
 import type { ModelUsage, UsageReport } from '../../core/usage.ts';
+import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
 import { PERMISSION_PROFILES, type PermissionProfile } from '../../permissions/policy.ts';
 import type {
   ModelEvent,
@@ -80,6 +81,7 @@ function systemPrompt(profile: PermissionProfile): string {
       : 'The user approves every command individually; workspace edits apply directly.',
     'If the user refuses an operation, do not repeat it: explain what you wanted to do or',
     'suggest an alternative.',
+    COMPLETION_GUIDANCE,
   ].join(' ');
 }
 

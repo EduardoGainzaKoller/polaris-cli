@@ -95,6 +95,12 @@ export async function runRepl(app: PolarisApp): Promise<void> {
         // No picker without a terminal: commands ask for an explicit argument.
         canSelect: false,
         select: async () => null,
+        // The prompt is paused while a command runs, so there is nobody to
+        // answer; a destructive command explains how to confirm explicitly.
+        confirm: async (question) => {
+          ui.info(`${question} Re-run with --yes to confirm without the interactive UI.`);
+          return false;
+        },
         clearScreen: () => ui.clearScreen(),
         requestExit: () => {
           exiting = true;

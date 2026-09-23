@@ -1,5 +1,6 @@
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
+import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
 import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
 import { VERSION } from '../../version.ts';
 import type {
@@ -107,6 +108,10 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
           cwd: options.cwd,
           ...THREAD_DEFAULTS,
           ...policy,
+          // Codex keeps its own system prompt; Polaris only adds how to finish.
+          ...(options.permissions === 'read-only'
+            ? {}
+            : { developerInstructions: COMPLETION_GUIDANCE }),
           ...(options.model ? { model: options.model } : {}),
         });
         threadId = thread.thread.id;
