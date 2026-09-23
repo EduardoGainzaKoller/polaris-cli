@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
-import type { PolarisConfig } from '../config/config.ts';
+import { type PolarisConfig, polarisHome } from '../config/config.ts';
+import { type ContextEvent, ContextManager } from '../context/manager.ts';
 import type { ApprovalDecision, ApprovalRequest } from '../permissions/gate.ts';
 import { PermissionGate } from '../permissions/gate.ts';
 import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
@@ -101,6 +102,17 @@ export interface AppState {
    */
   readonly approval: ApprovalRequest | null;
   readonly workspace: WorkspaceState;
+  readonly context: ContextState;
+}
+
+/** Project instructions and skills, as the UI shows them. */
+export interface ContextState {
+  /** POLARIS.md files in use, farthest first. */
+  readonly sources: readonly string[];
+  /** Skills that can be loaded. */
+  readonly available: number;
+  /** Skills loaded in this conversation, in load order. */
+  readonly loaded: readonly string[];
 }
 
 /**
@@ -125,9 +137,24 @@ export class PolarisApp {
   /** null until `start`. */
   #tracker: ChangeTracker | null = null;
   readonly #verifier = new Verifier();
+  readonly #context: ContextManager;
+  /** Transcript entries of skills still loading, by name. */
+  readonly #loadingSkills = new Map<string, string>();
 
-  constructor(options: { cwd: string; config: PolarisConfig; approvals?: boolean }) {
+  constructor(options: {
+    cwd: string;
+    config: PolarisConfig;
+    approvals?: boolean;
+    /** Polaris's home, where user skills live; `~/.polaris` by default. */
+    home?: string;
+  }) {
     this.cwd = options.cwd;
+    this.#context = new ContextManager({
+      workspace: options.cwd,
+      boundary: null,
+      home: options.home ?? polarisHome(),
+    });
+    this.#context.onEvent((event) => this.#onContextEvent(event));
     // A config that names no profile gets the default, never a wider one: the
     // safe fallback is the point of having a default at all.
     this.#config = {
@@ -140,7 +167,12 @@ export class PolarisApp {
     // Without a UI that can render an approval there is nobody to consent, and
     // the gate denies rather than waiting forever for an answer.
     if (options.approvals === false) {
-      this.#session = new Session({ cwd: this.cwd, config: this.#config, gate: this.#gate });
+      this.#session = new Session({
+        cwd: this.cwd,
+        config: this.#config,
+        gate: this.#gate,
+        context: this.#context,
+      });
       return;
     }
     // Every approval, from any runtime, arrives here and becomes one piece of
@@ -160,7 +192,12 @@ export class PolarisApp {
           this.#set('approving');
         }),
     );
-    this.#session = new Session({ cwd: this.cwd, config: this.#config, gate: this.#gate });
+    this.#session = new Session({
+      cwd: this.cwd,
+      config: this.#config,
+      gate: this.#gate,
+      context: this.#context,
+    });
   }
 
   /** The pending approval, or null. The UI answers it with `resolveApproval`. */
@@ -192,6 +229,11 @@ export class PolarisApp {
       permissions: this.#gate.profile,
       approval: this.#approval?.request ?? null,
       workspace: this.#workspace(),
+      context: {
+        sources: this.#context.project.sources.map((source) => source.display),
+        available: this.#context.skills.list().length,
+        loaded: this.#context.loaded.map((skill) => skill.metadata.name),
+      },
     };
   }
 
@@ -215,9 +257,132 @@ export class PolarisApp {
     return () => this.#listeners.delete(listener);
   }
 
+  /**
+   * The workspace first — Git tells the project context where to stop
+   * looking — then the context, which the provider session is started with.
+   * A broken POLARIS.md or skill is reported, never fatal.
+   */
   async start(): Promise<void> {
-    await this.#session.start();
     this.#tracker = await ChangeTracker.start(this.cwd);
+    this.#context.boundary = this.#tracker.git?.root ?? null;
+    await this.#context.reloadProject();
+    await this.#context.reloadSkills();
+    await this.#session.start();
+    for (const error of this.#context.project.errors) this.notice(error, 'error');
+    const invalid = this.#context.skills.invalid().length;
+    if (invalid > 0) {
+      this.notice(
+        `Warning: ${invalid} ${invalid === 1 ? 'skill' : 'skills'} could not be loaded. See /skills.`,
+        'error',
+      );
+    }
+    this.#emit();
+  }
+
+  /** The context manager, for commands that list or show it. */
+  get context(): ContextManager {
+    return this.#context;
+  }
+
+  /**
+   * `/context reload`. A runtime that re-reads Polaris's instructions every
+   * request just uses the new ones; the others were given them when the
+   * session started, so a new session — a new conversation — is the only
+   * honest way to apply them.
+   */
+  async reloadContext(): Promise<void> {
+    this.#idle();
+    const project = await this.#context.reloadProject();
+    for (const error of project.errors) this.notice(error, 'error');
+    if (this.#session.liveInstructions) {
+      this.notice('Project context reloaded. It applies from the next message.');
+      return;
+    }
+    await this.#swap(this.#config, 'context', 'Project context reloaded. Conversation reset.');
+  }
+
+  /** `/skills reload`: rediscovers skills; loads nothing. */
+  async reloadSkills(): Promise<void> {
+    this.#idle();
+    await this.#context.reloadSkills();
+    this.#emit();
+  }
+
+  /** `/skill <name>`: the user loads a skill for this conversation. */
+  async loadSkill(name: string): Promise<boolean> {
+    this.#idle();
+    const { skill } = await this.#context.load(name);
+    this.#emit();
+    return skill !== null;
+  }
+
+  /**
+   * `/skill unload <name>`. Only a runtime that is given its instructions
+   * afresh every request can really forget one; for the others the text is
+   * already part of the conversation, so unloading means starting a new one.
+   */
+  async unloadSkill(name: string): Promise<void> {
+    this.#idle();
+    if (!this.#context.loaded.some((skill) => skill.metadata.name === name)) {
+      this.notice(`${name} is not loaded.`);
+      return;
+    }
+    this.#context.unload(name);
+    if (this.#session.liveInstructions) {
+      this.notice(`Skill unloaded: ${name}. It no longer applies from the next message.`);
+      this.#emit();
+      return;
+    }
+    await this.#swap(
+      this.#config,
+      'conversation',
+      `Skill unloaded: ${name}. Conversation reset — ${this.#session.providerId} keeps instructions it has already seen.`,
+    );
+  }
+
+  /** Skill loads appear in the transcript under the skill's name, like a tool call. */
+  #onContextEvent(event: ContextEvent): void {
+    const entry = (name: string, target: string): string => {
+      const message: UiMessage = {
+        id: `m${this.#nextId++}`,
+        role: 'tool',
+        text: '',
+        state: 'streaming',
+        tool: { name, target },
+      };
+      this.#messages = [...this.#messages, message];
+      return message.id;
+    };
+    const finish = (id: string, state: MessageState, detail: string) =>
+      this.#update(id, (message) => ({
+        ...message,
+        state,
+        tool: { ...(message.tool as ToolCall), detail },
+      }));
+
+    switch (event.type) {
+      case 'skill-load-start':
+        this.#loadingSkills.set(event.name, entry('Skill', event.name));
+        break;
+      case 'skill-loaded': {
+        const id = this.#loadingSkills.get(event.name) ?? entry('Skill', event.name);
+        this.#loadingSkills.delete(event.name);
+        finish(id, 'complete', event.already ? 'already loaded' : 'loaded');
+        break;
+      }
+      case 'skill-load-error': {
+        const id = this.#loadingSkills.get(event.name) ?? entry('Skill', event.name);
+        this.#loadingSkills.delete(event.name);
+        finish(id, 'error', event.error);
+        break;
+      }
+      case 'reference-loaded':
+        finish(entry('Reference', `${event.skill}/${event.path}`), 'complete', 'loaded');
+        break;
+      case 'reference-error':
+        finish(entry('Reference', `${event.skill}/${event.path}`), 'error', event.error);
+        break;
+    }
     this.#emit();
   }
 
@@ -255,6 +420,9 @@ export class PolarisApp {
       if (answer) this.#update(answer, (message) => ({ ...message, state }));
       answer = null;
     };
+    // A skill load is shown where it happened: text after it starts a new
+    // answer, exactly as it does after a tool call.
+    const stopSealing = this.#context.onEvent(() => seal('complete'));
 
     try {
       for await (const event of this.#session.send(text, controller.signal)) {
@@ -329,6 +497,7 @@ export class PolarisApp {
         this.#set('error');
       }
     } finally {
+      stopSealing();
       this.#verifier.cancelRunning();
       await this.#observe('polaris');
       this.#turn = null;
@@ -408,6 +577,9 @@ export class PolarisApp {
    */
   async newConversation(): Promise<void> {
     this.#idle();
+    // A new conversation starts with no skill loaded; the project's own
+    // instructions stay, since they describe the project, not the chat.
+    this.#context.clearLoaded();
     await this.#swap(
       this.#config,
       'conversation',
@@ -613,7 +785,7 @@ export class PolarisApp {
   async #swap(config: PolarisConfig, what: string, notice?: string): Promise<void> {
     const previous = this.#session;
     this.#set('switching');
-    const next = new Session({ cwd: this.cwd, config, gate: this.#gate });
+    const next = new Session({ cwd: this.cwd, config, gate: this.#gate, context: this.#context });
     try {
       await next.start();
     } catch (error) {

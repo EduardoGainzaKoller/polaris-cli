@@ -1,10 +1,20 @@
 import {
+  createSdkMcpServer,
   type EffortLevel,
   type Options,
   query,
   type SDKMessage,
   type SDKUserMessage,
+  tool,
 } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
+import {
+  LOAD_SKILL,
+  LOAD_SKILL_DESCRIPTION,
+  READ_REFERENCE_DESCRIPTION,
+  READ_SKILL_REFERENCE,
+  type SessionContext,
+} from '../../context/manager.ts';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
 import type { ModelUsage, UsageReport } from '../../core/usage.ts';
@@ -22,6 +32,7 @@ import {
   claudeAccess,
   DENIED_TOOLS,
   permissionBridge,
+  SKILL_SERVER,
   toolsFor,
   workspaceGuard,
 } from './tools.ts';
@@ -101,6 +112,9 @@ const BASE_OPTIONS: Options = {
   // user — the one thing v0.6 exists to prevent.
   permissionMode: 'default',
   settingSources: [],
+  // Only the MCP servers Polaris passes exist: no project `.mcp.json`, no
+  // user settings, no plugins.
+  strictMcpConfig: true,
   includePartialMessages: true,
   persistSession: false,
 };
@@ -131,6 +145,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       let effort: EffortLevel | undefined =
         session.effort === undefined ? undefined : asEffort(session.effort);
       const translator = new ClaudeToolTranslator(session.cwd);
+      const context = session.context;
 
       function start(): ClaudeRun {
         if (active) return active;
@@ -140,7 +155,19 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
             options: {
               ...BASE_OPTIONS,
               cwd: session.cwd,
-              systemPrompt: systemPrompt(session.permissions),
+              // Fixed for the life of the runtime session: the SDK takes the
+              // system prompt when `query()` starts.
+              systemPrompt: [
+                systemPrompt(session.permissions),
+                context?.instructions({ canLoad: true }),
+              ]
+                .filter(Boolean)
+                .join('\n\n'),
+              ...(context?.hasSkills
+                ? // The permission bridge allows these two itself; `allowedTools`
+                  // would bypass it and makes the SDK warn on stderr.
+                  { mcpServers: { [SKILL_SERVER]: skillServer(context) } }
+                : {}),
               tools: toolsFor(session.permissions),
               canUseTool: permissionBridge(session.cwd, session.gate),
               hooks: {
@@ -178,9 +205,20 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
         async *send(input, signal): AsyncIterable<ModelEvent> {
           signal?.throwIfAborted();
           const claude = start();
+          // A skill the user loaded after the session started cannot join the
+          // system prompt, so it travels with this message instead, once.
+          const pending = context?.pending();
           queue.push({
             type: 'user',
-            message: { role: 'user', content: input },
+            message: {
+              role: 'user',
+              content: pending
+                ? [
+                    { type: 'text', text: pending },
+                    { type: 'text', text: input },
+                  ]
+                : input,
+            },
             parent_tool_use_id: null,
           });
 
@@ -258,6 +296,32 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
 }
 
 export const claudeProvider: ModelProvider = createClaudeProvider();
+
+/**
+ * Skill loading through the Agent SDK's own custom-tool mechanism: an
+ * in-process MCP server. The reply carries the skill's instructions, which is
+ * how they enter a conversation whose system prompt is already fixed.
+ */
+function skillServer(context: SessionContext) {
+  const reply = ({ ok, text }: { ok: boolean; text: string }) => ({
+    content: [{ type: 'text' as const, text }],
+    ...(ok ? {} : { isError: true }),
+  });
+  return createSdkMcpServer({
+    name: SKILL_SERVER,
+    tools: [
+      tool(LOAD_SKILL, LOAD_SKILL_DESCRIPTION, { name: z.string() }, async ({ name }) =>
+        reply(await context.loadSkill(name, { inline: true })),
+      ),
+      tool(
+        READ_SKILL_REFERENCE,
+        READ_REFERENCE_DESCRIPTION,
+        { skill: z.string(), path: z.string() },
+        async ({ skill, path }) => reply(await context.readReference(skill, path)),
+      ),
+    ],
+  });
+}
 
 /**
  * The runtime's own accounting, translated. `modelUsage` is keyed by the model

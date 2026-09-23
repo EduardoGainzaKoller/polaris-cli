@@ -70,3 +70,24 @@ export const MAX_CHECKPOINT_STORE_BYTES = 256 * 1024 * 1024;
 
 /** Diff lines `/diff` prints before cutting; the file list is never cut. */
 export const MAX_SESSION_DIFF_LINES = 400;
+
+/**
+ * Largest POLARIS.md read. A bigger one is refused, never truncated: cutting a
+ * file of instructions in half can change what it says.
+ */
+export const MAX_PROJECT_CONTEXT_BYTES = 64 * 1024;
+
+/** Largest SKILL.md, refused rather than truncated for the same reason. */
+export const MAX_SKILL_BYTES = 64 * 1024;
+
+/** Largest skill reference file handed to the model in one piece. */
+export const MAX_REFERENCE_BYTES = 128 * 1024;
+
+/** Skills one conversation may load; a guard against a model loading everything. */
+export const MAX_LOADED_SKILLS = 8;
+
+/** Longest skill description kept for discovery. */
+export const MAX_SKILL_DESCRIPTION = 1024;
+
+/** Reference files listed for one skill. */
+export const MAX_SKILL_REFERENCES = 50;

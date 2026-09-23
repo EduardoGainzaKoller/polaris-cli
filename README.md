@@ -9,7 +9,7 @@ Every operation that changes something is shown to you before it happens — the
 diff, the exact command — and waits for you to allow or deny it.
 
 ```text
- ✦ my-project                                                              v0.7.0
+ ✦ my-project                                                              v0.8.0
 
   ┃
   ┃ Añade validación a createUser y ejecuta los tests
@@ -371,6 +371,69 @@ Outside Git, Polaris still works: `/status` says `git: not a repository`, and on
 changed through a file tool (Polaris's own, Claude's `Write`/`Edit`, Codex patches) are
 tracked, captured just before each change.
 
+## Project context and skills
+
+Polaris can learn how a project wants work done, and pick up reusable procedures only
+when a task needs them.
+
+**`POLARIS.md`** holds the project's standing instructions — architecture rules, the
+stack, how to test, what never to do. Polaris reads it from the workspace and from every
+directory above it up to the root of the Git repository (never beyond: not the drive root,
+not your home). In a monorepo, launching in `repo/backend` gives the model
+`repo/POLARIS.md` and then `repo/backend/POLARIS.md`; the nearer file takes precedence. A
+file over 64 KB is refused rather than truncated. Outside Git only the workspace's own file
+is read.
+
+**Skills** are folders with a `SKILL.md` — Markdown with a small frontmatter — and optional
+reference files:
+
+```text
+.polaris/skills/spring-boot-testing/     project skill (can be versioned with the repo)
+├── SKILL.md
+└── references/
+    └── testing-patterns.md
+~/.polaris/skills/code-review/SKILL.md   user skill, available in every project
+```
+
+```markdown
+---
+name: spring-boot-testing
+description: Implement and verify Spring Boot tests.
+---
+
+When adding tests, inspect the existing conventions first and run targeted tests…
+Consult references/testing-patterns.md when choosing between slice and integration tests.
+```
+
+`name` must be lowercase-kebab-case and match its folder; `description` is what the model
+chooses by, so make it specific. A project skill replaces a user skill of the same name. A
+broken skill is listed as invalid and never stops Polaris from starting.
+
+**Progressive disclosure.** At startup the model sees only each skill's name and
+description. When one is relevant it loads it (`● Skill spring-boot-testing  loaded`) and
+gets the instructions plus the *names* of its references; it reads a reference only when it
+needs one. You can load one yourself with `/skill <name>`. A skill is knowledge, not a
+tool: it registers nothing, runs nothing — `scripts/` are not supported — and cannot
+change permissions, the workspace boundary or a sandbox; Polaris enforces those in code
+whatever a skill or `POLARIS.md` says. Text in source files, READMEs or command output is
+treated as data, never as instructions.
+
+The same skill works unchanged with every provider; only the delivery differs:
+
+| Provider | Project context | Model loads a skill through |
+| --- | --- | --- |
+| `anthropic-api` | system prompt, re-rendered every request | Polaris's own `load_skill` tool |
+| `claude` | the Agent SDK `systemPrompt` | an in-process MCP server Polaris starts (`strictMcpConfig`: no other MCP) |
+| `codex` | the thread's `developerInstructions` | App Server `dynamicTools` (an experimental field; if refused, skills are loaded with `/skill` only) |
+
+Polaris never reads `CLAUDE.md`, `AGENTS.md`, Claude settings or skills, or Codex's own
+instructions: its context is `POLARIS.md` and its own skills.
+
+Loaded skills last for the conversation. `/new` clears them and keeps `POLARIS.md`.
+`anthropic-api` is given its instructions afresh on every request, so `/context reload`
+and `/skill unload` apply to the next message; the Claude and Codex runtimes fix them when
+the session starts, so there both start a new conversation — and Polaris says so.
+
 ## Commands
 
 | Command | Description |
@@ -388,7 +451,10 @@ tracked, captured just before each change.
 | `/checkpoints` | List this session's checkpoints |
 | `/undo [cp-N]` | Restore Polaris's changes to the latest (or a given) checkpoint, after confirming |
 | `/verify` | Have the model run the project's checks against the current changes |
-| `/new` | New conversation; same provider, model, permissions and files |
+| `/new` | New conversation; same provider, model, permissions and files; loaded skills cleared |
+| `/context [show\|reload]` | The POLARIS.md files in use, their content, or re-read them |
+| `/skills [reload]` | Skills available, with scope, source and whether loaded; `reload` rediscovers |
+| `/skill <name>` | Load a skill into this conversation (`/skill unload <name>` to drop it) |
 | `/clear` | Clear the transcript (the provider keeps its conversation) |
 | `/exit` | Exit Polaris (`exit`, `quit`, `/q` also work) |
 
@@ -462,6 +528,10 @@ src/
     codex/             Codex App Server (JSON-RPC over stdio)
       app-server.ts    the process + protocol seam; tests replace it wholesale
   tools/               file and command tools, the workspace boundary and every limit
+  context/
+    project.ts         POLARIS.md, from the workspace up to the Git root
+    skills.ts          SkillRegistry: discovery, SKILL.md parsing, references
+    manager.ts         ContextManager: loaded skills, events, the one rendering
   workspace/
     git.ts             read-only Git: status (porcelain v2), files at a commit
     changes.ts         ChangeTracker: baseline, session changes, checkpoints, undo

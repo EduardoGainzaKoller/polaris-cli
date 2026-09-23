@@ -9,7 +9,7 @@ import {
 } from '../src/providers/claude/index.ts';
 import { permissionBridge } from '../src/providers/claude/tools.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
-import { autoGate, testSession } from './helpers.ts';
+import { autoGate, skillContext, testSession } from './helpers.ts';
 
 const MODEL = 'claude-sonnet-5';
 
@@ -80,7 +80,8 @@ function fakeClaude(options: FakeOptions = {}) {
       async *[Symbol.asyncIterator]() {
         yield init();
         for await (const message of prompt) {
-          seen.prompts.push(String(message.message.content));
+          const content = message.message.content;
+          seen.prompts.push(typeof content === 'string' ? content : JSON.stringify(content));
           interrupted = false;
           for (const frame of frames.shift() ?? []) yield frame;
           for (const chunk of replies.shift() ?? ['ok']) {
@@ -159,7 +160,8 @@ test('under read-only only the three inspection tools reach the runtime', async 
   for (const denied of ['NotebookEdit', 'WebFetch', 'WebSearch']) {
     assert.ok(seen.options?.disallowedTools?.includes(denied), `${denied} is denied`);
   }
-  assert.ok(seen.options?.disallowedTools?.includes('mcp__*'), 'no MCP tools');
+  assert.equal(seen.options?.strictMcpConfig, true, 'no MCP but Polaris’s own');
+  assert.equal(seen.options?.mcpServers, undefined, 'and none at all without skills');
   assert.equal(seen.options?.hooks?.PreToolUse?.length, 1);
   assert.deepEqual(seen.options?.settingSources, [], 'no CLAUDE.md, settings, skills or plugins');
   assert.equal(seen.options?.cwd, '/work');
@@ -298,4 +300,87 @@ test('closing the session shuts the runtime down', async () => {
   await collect(session.send('hola'));
   await session.close();
   assert.equal(seen.closed, true);
+});
+
+// ---------------------------------------------------------- project context
+
+test('project context goes in the system prompt, skills through Polaris’s own MCP server', async () => {
+  const fake = fakeClaude();
+  const { session: context } = await skillContext();
+  const session = await createClaudeProvider(fake.run).createSession({
+    ...testSession('/tmp'),
+    context,
+  });
+  await collect(session.send('hi'));
+
+  const options = fake.seen.options as Options;
+  const prompt = String(options.systemPrompt);
+  assert.match(prompt, /PROJECT-RULE/);
+  assert.match(prompt, /- testing: Write and run tests\./);
+  assert.doesNotMatch(prompt, /TESTING-BODY/);
+  // Polaris's context, not Claude Code's: no CLAUDE.md, settings, skills or foreign MCP.
+  assert.deepEqual(options.settingSources, []);
+  assert.equal(options.strictMcpConfig, true);
+  assert.deepEqual(Object.keys(options.mcpServers ?? {}), ['polaris']);
+  assert.equal(options.allowedTools, undefined, 'the bridge decides, nothing bypasses it');
+  assert.ok(!options.disallowedTools?.some((name) => name.startsWith('mcp__')));
+  assert.equal(session.liveInstructions, undefined, 'the system prompt is fixed at start');
+  await session.close();
+});
+
+test('a skill the user loads later travels with the next message, once', async () => {
+  const fake = fakeClaude({ replies: [['a'], ['b'], ['c']] });
+  const { manager, session: context } = await skillContext();
+  const session = await createClaudeProvider(fake.run).createSession({
+    ...testSession('/tmp'),
+    context,
+  });
+  await collect(session.send('first'));
+  await manager.load('testing');
+  await collect(session.send('second'));
+  await collect(session.send('third'));
+  assert.doesNotMatch(fake.seen.prompts[0] ?? '', /TESTING-BODY/);
+  assert.match(fake.seen.prompts[1] ?? '', /TESTING-BODY[\s\S]*second/);
+  assert.doesNotMatch(fake.seen.prompts[2] ?? '', /TESTING-BODY/);
+  await session.close();
+});
+
+test('a runtime call to load a skill is not shown as a tool', async () => {
+  const fake = fakeClaude({
+    frames: [
+      [
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 's1',
+                name: 'mcp__polaris__load_skill',
+                input: { name: 'testing' },
+              },
+            ],
+          },
+        } as unknown as SDKMessage,
+      ],
+    ],
+  });
+  const session = await createClaudeProvider(fake.run).createSession(testSession('/tmp'));
+  const events = await collect(session.send('go'));
+  assert.equal(
+    events.some((event) => event.type === 'tool-start'),
+    false,
+  );
+  await session.close();
+});
+
+test('the skill tools are allowed without an approval, and nothing else gets that', async () => {
+  const { gate, asked } = autoGate('ask', 'deny');
+  const bridge = permissionBridge('/tmp', gate);
+  const signal = new AbortController().signal;
+  const allowed = await bridge('mcp__polaris__load_skill', { name: 'x' }, { signal } as never);
+  assert.equal(allowed.behavior, 'allow');
+  const other = await bridge('mcp__someone__load_skill', {}, { signal } as never);
+  assert.equal(other.behavior, 'deny');
+  assert.deepEqual(asked, []);
 });

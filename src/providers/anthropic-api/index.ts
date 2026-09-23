@@ -1,4 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk';
+import {
+  LOAD_SKILL,
+  LOAD_SKILL_DESCRIPTION,
+  READ_REFERENCE_DESCRIPTION,
+  READ_SKILL_REFERENCE,
+} from '../../context/manager.ts';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
 import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
@@ -68,6 +74,32 @@ function systemPrompt(profile: PermissionProfile): string {
   ].join(' ');
 }
 
+const SKILL_TOOLS: Anthropic.Tool[] = [
+  {
+    name: LOAD_SKILL,
+    description: LOAD_SKILL_DESCRIPTION,
+    input_schema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'The skill name, as listed.' } },
+      required: ['name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: READ_SKILL_REFERENCE,
+    description: READ_REFERENCE_DESCRIPTION,
+    input_schema: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: 'A loaded skill.' },
+        path: { type: 'string', description: 'A reference path it lists, e.g. references/x.md.' },
+      },
+      required: ['skill', 'path'],
+      additionalProperties: false,
+    },
+  },
+];
+
 /**
  * Polaris owns the agent loop here, because the Messages API is stateless:
  * stream a response, run the tools it asks for, send the results back, repeat.
@@ -92,11 +124,21 @@ export const anthropicApiProvider: ModelProvider = {
     const registry = createRegistry(options.permissions, options.gate);
     const prompt = systemPrompt(options.permissions);
     const usage = new UsageTracker();
-    const tools: Anthropic.Tool[] = registry.list().map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: { ...tool.inputSchema, required: [...tool.inputSchema.required] },
-    }));
+    const context = options.context;
+    const tools: Anthropic.Tool[] = [
+      ...registry.list().map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: { ...tool.inputSchema, required: [...tool.inputSchema.required] },
+      })),
+      // Not workspace tools: they ask Polaris's context manager for a skill,
+      // which is why they never reach the registry or the permission gate.
+      ...(context?.hasSkills ? SKILL_TOOLS : []),
+    ];
+    // Rendered for every request, so a skill loaded mid-turn, a reloaded
+    // POLARIS.md or an unloaded skill is what the very next request sees.
+    const system = () =>
+      [prompt, context?.instructions({ canLoad: true })].filter(Boolean).join('\n\n');
     // The conversation lives here and is replayed every request. This is the
     // only place in Polaris that knows Anthropic's message shape.
     const messages: Anthropic.MessageParam[] = [];
@@ -105,6 +147,7 @@ export const anthropicApiProvider: ModelProvider = {
     return {
       model,
       access: polarisAccess(options.permissions),
+      liveInstructions: true,
       get effort() {
         return effort;
       },
@@ -135,7 +178,7 @@ export const anthropicApiProvider: ModelProvider = {
               {
                 model,
                 max_tokens: MAX_TOKENS,
-                system: prompt,
+                system: system(),
                 output_config: { effort },
                 tools,
                 messages,
@@ -168,8 +211,22 @@ export const anthropicApiProvider: ModelProvider = {
             // open at once is a UI nobody can answer, and two writes racing on
             // one file is worse. Ordering costs a little latency and buys a
             // transcript that matches what actually happened.
-            const results = [];
+            const results: Array<{ text: string; error: boolean }> = [];
             for (const call of calls) {
+              // Skill requests are answered by the context manager, which
+              // reports them to the UI itself; they are not tool activity.
+              if (context && (call.name === LOAD_SKILL || call.name === READ_SKILL_REFERENCE)) {
+                const input = (call.input ?? {}) as Record<string, unknown>;
+                const reply =
+                  call.name === LOAD_SKILL
+                    ? await context.loadSkill(String(input.name ?? ''), { inline: false })
+                    : await context.readReference(
+                        String(input.skill ?? ''),
+                        String(input.path ?? ''),
+                      );
+                results.push({ text: reply.text, error: !reply.ok });
+                continue;
+              }
               yield toolStarted(registry, call.id, call.name, call.input);
               const streamed: ModelEvent[] = [];
               const result = await registry.execute(call.name, call.input, {
@@ -178,7 +235,7 @@ export const anthropicApiProvider: ModelProvider = {
                 onOutput: (text) => streamed.push({ type: 'tool-output-delta', id: call.id, text }),
               });
               for (const event of streamed) yield event;
-              results.push(result);
+              results.push({ text: toolResultText(result), error: !result.ok });
               yield toolFinished(call.id, result);
             }
             // Every result in a single user message, errors included: splitting
@@ -188,8 +245,8 @@ export const anthropicApiProvider: ModelProvider = {
               content: results.map((result, index) => ({
                 type: 'tool_result',
                 tool_use_id: (calls[index] as Anthropic.ToolUseBlock).id,
-                content: toolResultText(result),
-                ...(result.ok ? {} : { is_error: true }),
+                content: result.text,
+                ...(result.error ? { is_error: true } : {}),
               })),
             });
           }

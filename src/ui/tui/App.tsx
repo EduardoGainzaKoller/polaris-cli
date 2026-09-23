@@ -203,7 +203,7 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
 
   // Narrow terminals lose the path first; the status and the workspace
   // indicator are what a glance at the footer is for.
-  const workspace = workspaceLabel(state.workspace);
+  const workspace = workspaceLabel(state.workspace, state.context.loaded.length);
   const fullPath = shortenPath(state.cwd);
   const where = size.columns - workspace.length - fullPath.length >= 60 ? fullPath : '';
   const hintsWidth = Math.max(0, size.columns - where.length - workspace.length - 28);

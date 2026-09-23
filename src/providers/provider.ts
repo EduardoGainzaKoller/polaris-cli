@@ -1,3 +1,4 @@
+import type { SessionContext } from '../context/manager.ts';
 import type { UsageReport } from '../core/usage.ts';
 import type { PermissionGate } from '../permissions/gate.ts';
 import type { PermissionProfile } from '../permissions/policy.ts';
@@ -21,6 +22,13 @@ export interface ProviderSessionOptions {
    * command and a Polaris `write_file` reach the user the same way.
    */
   readonly gate: PermissionGate;
+  /**
+   * Project instructions and skills, provider-agnostic. Each provider hands
+   * `instructions()` to its runtime through that runtime's own channel and
+   * lets the model load skills through its own custom-tool mechanism.
+   * Absent in sessions that carry no project context (most tests).
+   */
+  readonly context?: SessionContext;
 }
 
 /**
@@ -123,6 +131,13 @@ export interface ModelSession {
   setEffort?(effort: string): Promise<void>;
   /** What this session may do, once the runtime has been configured for it. */
   readonly access: ToolAccess;
+  /**
+   * True when the runtime is given Polaris's instructions afresh on every
+   * request, so a reloaded POLARIS.md or an unloaded skill applies without a
+   * new conversation. False (or absent) when they are fixed when the session
+   * starts and anything already said stays in the conversation.
+   */
+  readonly liveInstructions?: boolean;
   /**
    * Tokens, limits and cost as this runtime measures them. Optional, and may
    * return null: a provider that cannot report consumption says so rather

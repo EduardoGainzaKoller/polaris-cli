@@ -90,3 +90,13 @@ test('a write outside the workspace is denied even under workspace-write', async
     'deny',
   );
 });
+
+test('only Polaris’s own skill tools pass as MCP; any other server’s tool is denied', async () => {
+  assert.equal(await decide('mcp__polaris__load_skill', { name: 'testing' }), 'pass');
+  assert.equal(
+    await decide('mcp__polaris__read_skill_reference', { skill: 'x', path: 'references/y.md' }),
+    'pass',
+  );
+  assert.equal(await decide('mcp__filesystem__write_file', { path: '/etc/passwd' }), 'deny');
+  assert.equal(await decide('mcp__polaris__something_else', {}), 'deny');
+});

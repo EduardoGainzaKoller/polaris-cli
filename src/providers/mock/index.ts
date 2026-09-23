@@ -18,13 +18,15 @@ import type {
  *   @edit(hello.ts :: 'hi' :: 'hello world')
  *   @run(node -e "console.log(1)")
  *   @wait(200)
+ *   @skill(spring-boot-testing)   @ref(spring-boot-testing :: references/x.md)
+ *   @context()   — answers with every instruction this session has received
  *
  * The tools are the real Polaris registry, running against the real workspace
  * under the real permission gate; only the "model" deciding to call them is
  * scripted. That makes a denied approval, a failing command and a full
  * read → edit → run loop all reproducible in a test.
  */
-const DIRECTIVE = /@(read|glob|grep|write|edit|run|wait)\(([\s\S]*?)\)(?=\s|$)/g;
+const DIRECTIVE = /@(read|glob|grep|write|edit|run|wait|skill|ref|context)\(([\s\S]*?)\)(?=\s|$)/g;
 
 const TOOL_FOR = {
   read: 'read_file',
@@ -74,6 +76,11 @@ export const mockProvider: ModelProvider = {
     // usage view can be exercised offline like everything else.
     let tokens = { input: 0, output: 0 };
     let effort = options.effort ?? 'medium';
+    // Like Claude and Codex, the mock is given its instructions once, at the
+    // start, and anything later as part of a message — so tests see exactly
+    // what a fixed-instruction runtime would.
+    const context = options.context;
+    const received: string[] = [context?.instructions({ canLoad: true }) ?? ''].filter(Boolean);
 
     return {
       model: options.model ?? 'echo',
@@ -93,6 +100,8 @@ export const mockProvider: ModelProvider = {
       async *send(input, signal): AsyncIterable<ModelEvent> {
         signal?.throwIfAborted();
         history.push(input);
+        const pending = context?.pending();
+        if (pending) received.push(pending);
         tokens = { ...tokens, input: tokens.input + Math.ceil(input.length / 4) };
         yield { type: 'message-start' };
 
@@ -100,6 +109,20 @@ export const mockProvider: ModelProvider = {
           signal?.throwIfAborted();
           if (kind === 'wait') {
             await sleep(Number(argument) || 0, signal);
+            continue;
+          }
+          if (kind === 'context') {
+            yield { type: 'text-delta', text: `${received.join('\n\n')}\n` };
+            continue;
+          }
+          if (kind === 'skill' || kind === 'ref') {
+            if (!context) continue;
+            const [first = '', second = ''] = argument.split('::').map((part) => part.trim());
+            const reply =
+              kind === 'skill'
+                ? await context.loadSkill(first, { inline: true })
+                : await context.readReference(first, second);
+            if (reply.ok) received.push(reply.text);
             continue;
           }
           const name = TOOL_FOR[kind as Kind];

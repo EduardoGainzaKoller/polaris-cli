@@ -1,6 +1,6 @@
 {
   "name": "polaris",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Interactive coding-agent CLI",
   "type": "module",
   "license": "MIT",
@@ -37,6 +37,8 @@
     "diff": "^8.0.4",
     "ignore": "^7.0.9",
     "ink": "^7.1.1",
-    "react": "^19.3.0"
+    "react": "^19.3.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
   }
 }

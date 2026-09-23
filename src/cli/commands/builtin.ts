@@ -47,6 +47,7 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
           ...(usage?.plan ? [`  plan      ${usage.plan}`] : []),
           `  turns     ${state.turns}`,
           `  session   ${state.status === 'error' ? 'error' : 'active'}`,
+          ...contextRows(state.context),
           '',
           ...workspaceRows(state.workspace),
         ];
@@ -349,6 +350,101 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       },
     },
     {
+      name: 'context',
+      blockedByApproval: true,
+      summary: 'Project instructions from POLARIS.md: /context [show|reload]',
+      run: async ({ app }, args) => {
+        if (args[0] === 'reload') {
+          await app.reloadContext();
+          return;
+        }
+        const { project } = app.context;
+        const budget = app.context.budget();
+        const lines = ['  Project Context', ''];
+        if (project.sources.length === 0) {
+          lines.push('  No POLARIS.md found between the workspace and the repository root.');
+        } else {
+          lines.push('  Sources (farthest first; the nearest takes precedence)');
+          for (const source of project.sources) {
+            lines.push(
+              `    ${source.display}  ${source.lines} ${source.lines === 1 ? 'line' : 'lines'}`,
+            );
+          }
+        }
+        for (const error of project.errors) lines.push(`  ✗ ${error}`);
+        lines.push(
+          '',
+          `  Added to the model: ~${chars(budget.project)} project · ~${chars(budget.skills)} skills · ~${chars(budget.references)} references`,
+        );
+        if (args[0] === 'show') {
+          for (const source of project.sources) {
+            lines.push(
+              '',
+              `  ── ${source.display} ──`,
+              ...source.content.split('\n').map((line) => `  ${line}`),
+            );
+          }
+        } else if (project.sources.length > 0) {
+          lines.push('  /context show prints them; /context reload re-reads them.');
+        }
+        app.notice(lines.join('\n'));
+      },
+    },
+    {
+      name: 'skills',
+      summary: 'List the skills Polaris can load: /skills [reload]',
+      run: async ({ app }, args) => {
+        if (args[0] === 'reload') await app.reloadSkills();
+        const skills = app.context.skills;
+        const loaded = new Set(app.state.context.loaded);
+        const available = skills.list();
+        const lines = ['  Skills', ''];
+        if (available.length === 0) {
+          lines.push('  None found in .polaris/skills/ or ~/.polaris/skills/.');
+        }
+        const width = Math.max(12, ...available.map((skill) => skill.name.length));
+        for (const skill of available) {
+          lines.push(
+            `  ${skill.name.padEnd(width)}  ${skill.scope.padEnd(7)}  ${loaded.has(skill.name) ? 'loaded' : ''}`.trimEnd(),
+            `    ${skill.description}`,
+            `    ${skill.display}${skill.overrides ? `  (overrides ${skill.overrides})` : ''}`,
+          );
+        }
+        const invalid = skills.invalid();
+        if (invalid.length > 0) {
+          lines.push('', '  Invalid');
+          for (const skill of invalid) {
+            lines.push(`  ${skill.name.padEnd(width)}  ${skill.scope.padEnd(7)}  ${skill.error}`);
+          }
+        }
+        if (args[0] === 'reload') lines.push('', '  Rediscovered. Nothing was loaded.');
+        app.notice(lines.join('\n'));
+      },
+    },
+    {
+      name: 'skill',
+      blockedByApproval: true,
+      summary: 'Load a skill into this conversation: /skill <name> | /skill unload <name>',
+      run: async ({ app }, args) => {
+        if (args[0] === 'unload') {
+          if (!args[1]) {
+            app.notice('Usage: /skill unload <name>', 'error');
+            return;
+          }
+          await app.unloadSkill(args[1]);
+          return;
+        }
+        const name = args[0];
+        if (!name) {
+          app.notice('Usage: /skill <name>. /skills lists them.', 'error');
+          return;
+        }
+        if (await app.loadSkill(name)) {
+          app.notice(`Skill loaded: ${name}. It stays active for this conversation.`);
+        }
+      },
+    },
+    {
       name: 'clear',
       summary: 'Clear the transcript (keeps the session)',
       run({ app, clearScreen }) {
@@ -365,6 +461,18 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       },
     },
   ];
+}
+
+/** The project-context and skill rows of /status. */
+function contextRows(context: AppState['context']): string[] {
+  return [
+    `  context   ${context.sources.length > 0 ? context.sources.join(', ') : 'no POLARIS.md'}`,
+    `  skills    ${context.loaded.length} loaded · ${context.available} available`,
+  ];
+}
+
+function chars(count: number): string {
+  return count < 1000 ? `${count} chars` : `${(count / 1000).toFixed(1)}k chars`;
 }
 
 /** The Git and verification rows of /status. */

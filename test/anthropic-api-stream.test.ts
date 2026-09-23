@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { anthropicApiProvider, DEFAULT_MODEL } from '../src/providers/anthropic-api/index.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
-import { autoGate, testSession } from './helpers.ts';
+import { autoGate, skillContext, testSession } from './helpers.ts';
 
 /**
  * Exercises the real SDK against a local server that speaks the Messages
@@ -461,5 +461,57 @@ test('a session that never ran a turn reports nothing rather than zeroes', async
   reset();
   const session = await anthropicApiProvider.createSession(testSession(workspace));
   assert.equal(await session.usage?.(), null);
+  await session.close();
+});
+
+// ---------------------------------------------------------- project context
+
+test('POLARIS.md and the skill catalog ride in the system prompt, bodies only once loaded', async () => {
+  reset();
+  const { manager, session: context } = await skillContext();
+  const seen: string[] = [];
+  manager.onEvent((event) => seen.push(event.type));
+  toolTurns = [[{ id: 'call_skill', name: 'load_skill', input: { name: 'testing' } }]];
+
+  const session = await anthropicApiProvider.createSession({ ...testSession(workspace), context });
+  assert.equal(session.liveInstructions, true);
+  const events = await collect(session.send('write tests'));
+
+  const [first, second] = requests as Array<{
+    system: string;
+    tools: Array<{ name: string }>;
+    messages: Array<{ role: string; content: unknown }>;
+  }>;
+  assert.match(first?.system ?? '', /PROJECT-RULE/);
+  assert.match(first?.system ?? '', /- testing: Write and run tests\./);
+  assert.doesNotMatch(first?.system ?? '', /TESTING-BODY/, 'progressive disclosure');
+  assert.ok(first?.tools.some((tool) => tool.name === 'load_skill'));
+  assert.ok(first?.tools.some((tool) => tool.name === 'read_skill_reference'));
+
+  // The very next request of the same turn carries the loaded skill.
+  assert.match(second?.system ?? '', /<loaded_skill name="testing">\nTESTING-BODY/);
+  const answer = JSON.stringify(second?.messages.at(-1));
+  assert.match(answer, /Skill \\"testing\\" loaded/);
+  assert.deepEqual(seen, ['skill-load-start', 'skill-loaded']);
+  assert.equal(
+    events.some((event) => event.type === 'tool-start'),
+    false,
+    'a skill load is not tool activity',
+  );
+  await session.close();
+});
+
+test('unloading a skill applies to the next request without a new conversation', async () => {
+  reset();
+  const { manager, session: context } = await skillContext();
+  await manager.load('testing');
+  const session = await anthropicApiProvider.createSession({ ...testSession(workspace), context });
+  await collect(session.send('one'));
+  manager.unload('testing');
+  await collect(session.send('two'));
+  const systems = (requests as Array<{ system: string; messages: unknown[] }>).map((r) => r.system);
+  assert.match(systems[0] ?? '', /TESTING-BODY/);
+  assert.doesNotMatch(systems[1] ?? '', /TESTING-BODY/);
+  assert.equal((requests[1] as { messages: unknown[] }).messages.length, 3, 'history kept');
   await session.close();
 });

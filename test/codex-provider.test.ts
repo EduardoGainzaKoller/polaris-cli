@@ -4,7 +4,7 @@ import { PolarisError } from '../src/core/errors.ts';
 import type { CodexConnection, JsonObject } from '../src/providers/codex/app-server.ts';
 import { codexProvider, createCodexProvider } from '../src/providers/codex/index.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
-import { autoGate, testSession } from './helpers.ts';
+import { autoGate, skillContext, testSession } from './helpers.ts';
 
 const THREAD = 'thread-1';
 const MODEL = 'gpt-5.6-luna';
@@ -18,6 +18,8 @@ interface FakeOptions {
   chunkDelayMs?: number;
   /** Thread items (started, then completed) emitted before each turn's text. */
   items?: Array<Array<{ started: JsonObject; completed: JsonObject }>>;
+  /** Behave like an App Server without the experimental `dynamicTools` field. */
+  rejectDynamicTools?: boolean;
 }
 
 /**
@@ -45,6 +47,9 @@ function fakeCodex(options: FakeOptions = {}) {
         return { authMethod, authToken: null } as T;
       }
       if (method === 'thread/start') {
+        if (options.rejectDynamicTools && (params as JsonObject)?.dynamicTools) {
+          throw new Error('unknown field `dynamicTools`');
+        }
         return { thread: { id: THREAD }, model: MODEL, reasoningEffort: 'medium' } as T;
       }
       if (method === 'model/list') {
@@ -508,4 +513,81 @@ test('a missing Codex CLI is reported without a stack trace', async () => {
     },
   );
   delete process.env.POLARIS_CODEX_EXECUTABLE;
+});
+
+// ---------------------------------------------------------- project context
+
+test('project context and skill tools go through the official thread fields', async () => {
+  const codex = fakeCodex();
+  const { session: context } = await skillContext();
+  const session = await createCodexProvider(codex.connect).createSession({
+    ...testSession('/tmp'),
+    context,
+  });
+
+  const init = codex.requestsFor('initialize')[0]?.params as JsonObject;
+  assert.deepEqual(init.capabilities, { experimentalApi: true });
+  const thread = codex.requestsFor('thread/start')[0]?.params as JsonObject;
+  const instructions = String(thread.developerInstructions);
+  assert.match(instructions, /PROJECT-RULE/);
+  assert.match(instructions, /- testing: Write and run tests\./);
+  assert.doesNotMatch(instructions, /TESTING-BODY/);
+  assert.deepEqual(
+    (thread.dynamicTools as Array<{ name: string }>).map((tool) => tool.name),
+    ['load_skill', 'read_skill_reference'],
+  );
+
+  const reply = (await codex.ask('item/tool/call', {
+    threadId: THREAD,
+    turnId: 't',
+    callId: 'c',
+    namespace: null,
+    tool: 'load_skill',
+    arguments: { name: 'testing' },
+  })) as { success: boolean; contentItems: Array<{ type: string; text: string }> };
+  assert.equal(reply.success, true);
+  assert.equal(reply.contentItems[0]?.type, 'inputText');
+  assert.match(reply.contentItems[0]?.text ?? '', /TESTING-BODY/);
+
+  const reference = (await codex.ask('item/tool/call', {
+    tool: 'read_skill_reference',
+    arguments: { skill: 'testing', path: '../../../POLARIS.md' },
+  })) as { success: boolean };
+  assert.equal(reference.success, false, 'references stay inside their skill');
+  await session.close();
+});
+
+test('without dynamic tools Codex still gets the context, and the user loads skills', async () => {
+  const codex = fakeCodex({ rejectDynamicTools: true, replies: [['a']] });
+  const { manager, session: context } = await skillContext();
+  const session = await createCodexProvider(codex.connect).createSession({
+    ...testSession('/tmp'),
+    context,
+  });
+  const [refused, accepted] = codex.requestsFor('thread/start');
+  assert.ok(refused?.params.dynamicTools);
+  assert.equal(accepted?.params.dynamicTools, undefined);
+  assert.match(String(accepted?.params.developerInstructions), /tell the user to run \/skill/);
+
+  await manager.load('testing');
+  await collect(session.send('go'));
+  const input = codex.requestsFor('turn/start')[0]?.params.input as Array<{ text: string }>;
+  assert.equal(input.length, 2);
+  assert.match(input[0]?.text ?? '', /<loaded_skill name="testing">/);
+  assert.equal(input[1]?.text, 'go');
+  await session.close();
+});
+
+test('a dynamic tool call for a skill is not rendered as a tool', async () => {
+  const call = { id: 'd1', type: 'dynamicToolCall', tool: 'load_skill', status: 'inProgress' };
+  const codex = fakeCodex({
+    items: [[{ started: call, completed: { ...call, status: 'completed' } }]],
+  });
+  const session = await createCodexProvider(codex.connect).createSession(testSession('/tmp'));
+  const events = await collect(session.send('go'));
+  assert.equal(
+    events.some((event) => event.type === 'tool-start'),
+    false,
+  );
+  await session.close();
 });

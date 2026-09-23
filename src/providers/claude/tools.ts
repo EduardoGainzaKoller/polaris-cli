@@ -29,17 +29,11 @@ const CAPABILITIES: Record<string, Capability> = {
  * Removed from the request outright, so the model never sees them. `tools`
  * already excludes everything not in `CAPABILITIES`; this is the second lock,
  * and it names the tools that would step outside v0.6's scope even under
- * workspace-write.
+ * workspace-write. MCP is not listed: `strictMcpConfig` means the only server
+ * that exists is Polaris's own skill server, and the PreToolUse guard denies
+ * any other tool name anyway.
  */
-export const DENIED_TOOLS = [
-  'MultiEdit',
-  'NotebookEdit',
-  'WebFetch',
-  'WebSearch',
-  'Agent',
-  'Task',
-  'mcp__*',
-];
+export const DENIED_TOOLS = ['MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task'];
 
 /** The runtime tools a profile makes available. */
 export function toolsFor(profile: PermissionProfile): string[] {
@@ -60,8 +54,25 @@ export function claudeAccess(profile: PermissionProfile): ToolAccess {
  * The gate answers `allow` on its own for read-only calls and for edits under
  * workspace-write, so the user is asked exactly as often as the profile says.
  */
+/**
+ * Polaris's skill tools, as the runtime names them: the in-process MCP server
+ * `polaris` serving `load_skill` and `read_skill_reference`. They read skills
+ * through Polaris's context manager, never the workspace, so they need no
+ * approval and no boundary check — and they are all the MCP there is.
+ */
+export const SKILL_SERVER = 'polaris';
+export const SKILL_TOOL_NAMES = [
+  `mcp__${SKILL_SERVER}__load_skill`,
+  `mcp__${SKILL_SERVER}__read_skill_reference`,
+] as const;
+
+function isSkillTool(name: string): boolean {
+  return (SKILL_TOOL_NAMES as readonly string[]).includes(name);
+}
+
 export function permissionBridge(cwd: string, gate: PermissionGate): CanUseTool {
   return async (toolName, input, { signal }) => {
+    if (isSkillTool(toolName)) return { behavior: 'allow', updatedInput: input };
     const capability = CAPABILITIES[toolName];
     if (!capability) {
       return { behavior: 'deny', message: `${toolName} is not available in Polaris.` };
@@ -165,6 +176,7 @@ export function workspaceGuard(cwd: string, profile: PermissionProfile): HookCal
       },
     });
 
+    if (isSkillTool(input.tool_name)) return {};
     if (!allowed.includes(input.tool_name)) {
       return deny(`${input.tool_name} is not available under the "${profile}" permission profile.`);
     }
@@ -214,6 +226,9 @@ export class ClaudeToolTranslator {
     for (const block of blocks(content)) {
       if (block.type !== 'tool_use' || typeof block.id !== 'string') continue;
       if (this.#started.has(block.id)) continue;
+      // Skill loads are reported by Polaris's context manager, under the
+      // skill's own name — never as `mcp__polaris__load_skill`.
+      if (isSkillTool(String(block.name ?? ''))) continue;
       const name = String(block.name ?? 'Tool');
       this.#started.set(block.id, name);
       events.push({

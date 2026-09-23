@@ -182,7 +182,7 @@ export function statusSegments(state: AppState, width: number): { left: string; 
  * changed, then whether those changes are verified. `main +2 · unverified`.
  * Empty when there is nothing worth a glance.
  */
-export function workspaceLabel(workspace: WorkspaceState): string {
+export function workspaceLabel(workspace: WorkspaceState, skills = 0): string {
   const changed = workspace.changed > 0 ? `+${workspace.changed}` : '';
   const where = workspace.git
     ? [workspace.git.branch ?? 'detached', changed].filter(Boolean).join(' ')
@@ -193,7 +193,7 @@ export function workspaceLabel(workspace: WorkspaceState): string {
       : workspace.verification === 'failed'
         ? 'checks failed'
         : workspace.verification;
-  return [where, verification].filter(Boolean).join(' · ');
+  return [where, verification, skills > 0 ? `skills:${skills}` : ''].filter(Boolean).join(' · ');
 }
 
 /** Commands offered while the composer holds a `/…` prefix. */

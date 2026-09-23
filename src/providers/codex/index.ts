@@ -1,3 +1,9 @@
+import {
+  LOAD_SKILL,
+  LOAD_SKILL_DESCRIPTION,
+  READ_REFERENCE_DESCRIPTION,
+  READ_SKILL_REFERENCE,
+} from '../../context/manager.ts';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
 import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
@@ -46,7 +52,15 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
         }
         turns.handle(method, params);
       });
+      const context = options.context;
       connection.onRequest(async (method, params) => {
+        // A model asking for a skill: answered by Polaris's context manager.
+        if (method === 'item/tool/call') {
+          const reply = context
+            ? await answerSkillCall(context, params)
+            : { ok: false, text: 'No such tool.' };
+          return { contentItems: [{ type: 'inputText', text: reply.text }], success: reply.ok };
+        }
         const card = toCard(method, params, (itemId) => turns.changesOf(itemId), options.cwd);
         if (!card) {
           // Anything Polaris cannot present is refused rather than guessed at:
@@ -75,6 +89,10 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
         await connection.request('initialize', {
           // Honest identification: Polaris is Polaris, not another client.
           clientInfo: { name: 'polaris', title: 'Polaris', version: VERSION },
+          // Registering Polaris's skill tools on a thread (`dynamicTools`) is
+          // an experimental App Server field; opted into only when there are
+          // skills to load.
+          ...(context?.hasSkills ? { capabilities: { experimentalApi: true } } : {}),
         });
         connection.notify('initialized', {});
 
@@ -104,16 +122,35 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
           throw adminRestricted('approval policy', policy.approvalPolicy, allowedPolicies);
         }
 
-        const thread = await connection.request<ThreadStartResponse>('thread/start', {
-          cwd: options.cwd,
-          ...THREAD_DEFAULTS,
-          ...policy,
-          // Codex keeps its own system prompt; Polaris only adds how to finish.
-          ...(options.permissions === 'read-only'
-            ? {}
-            : { developerInstructions: COMPLETION_GUIDANCE }),
-          ...(options.model ? { model: options.model } : {}),
-        });
+        // Codex keeps its own system prompt; Polaris adds how to finish, and
+        // the project's context, as developer instructions.
+        const startThread = (canLoad: boolean) => {
+          const developerInstructions = [
+            options.permissions === 'read-only' ? '' : COMPLETION_GUIDANCE,
+            context?.instructions({ canLoad }) ?? '',
+          ]
+            .filter(Boolean)
+            .join('\n\n');
+          return connection.request<ThreadStartResponse>('thread/start', {
+            cwd: options.cwd,
+            ...THREAD_DEFAULTS,
+            ...policy,
+            ...(developerInstructions ? { developerInstructions } : {}),
+            ...(canLoad ? { dynamicTools: SKILL_TOOLS } : {}),
+            ...(options.model ? { model: options.model } : {}),
+          });
+        };
+        let thread: ThreadStartResponse;
+        try {
+          thread = await startThread(context?.hasSkills === true);
+        } catch (error) {
+          if (!context?.hasSkills) throw error;
+          // A Codex without the experimental field still gets the context;
+          // skills are then loaded by the user with /skill, and the catalog
+          // tells the model so.
+          debug('codex', 'dynamic tools refused, skills are user-loaded only', error);
+          thread = await startThread(false);
+        }
         threadId = thread.thread.id;
         // The runtime reports the model it actually resolved; Polaris never
         // invents one.
@@ -159,9 +196,15 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
           const turn = turns.open();
           let turnId: string;
           try {
+            // A skill loaded with /skill after the thread started travels with
+            // this message, once: developer instructions are fixed per thread.
+            const pending = context?.pending();
             const started = await connection.request<TurnStartResponse>('turn/start', {
               threadId,
-              input: [{ type: 'text', text: input, text_elements: [] }],
+              input: [
+                ...(pending ? [{ type: 'text', text: pending, text_elements: [] }] : []),
+                { type: 'text', text: input, text_elements: [] },
+              ],
               ...(effort ? { effort } : {}),
             });
             turnId = started.turn.id;
@@ -340,6 +383,8 @@ class TurnRouter {
       isToolItem(params.item)
     ) {
       const item = params.item;
+      // Skill loads are shown by Polaris under the skill's name, not as tools.
+      if (item.type === 'dynamicToolCall' && SKILL_TOOL_NAMES.has(String(item.tool ?? ''))) return;
       if (item.type === 'fileChange') this.#changes.set(item.id as string, fileChanges(item));
       if (method === 'item/fileChange/patchUpdated') return;
       const event = method === 'item/started' ? itemStarted(item, this.#cwd) : itemCompleted(item);
@@ -398,6 +443,49 @@ class Turn {
       });
     }
   }
+}
+
+const SKILL_TOOL_NAMES = new Set<string>([LOAD_SKILL, READ_SKILL_REFERENCE]);
+
+/** `dynamicTools` entries for thread/start. */
+const SKILL_TOOLS = [
+  {
+    type: 'function',
+    name: LOAD_SKILL,
+    description: LOAD_SKILL_DESCRIPTION,
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: READ_SKILL_REFERENCE,
+    description: READ_REFERENCE_DESCRIPTION,
+    inputSchema: {
+      type: 'object',
+      properties: { skill: { type: 'string' }, path: { type: 'string' } },
+      required: ['skill', 'path'],
+      additionalProperties: false,
+    },
+  },
+];
+
+/** `item/tool/call`: the reply carries the skill's text into the thread. */
+async function answerSkillCall(
+  context: NonNullable<ProviderSessionOptions['context']>,
+  params: JsonObject,
+): Promise<{ ok: boolean; text: string }> {
+  const args = (params.arguments ?? {}) as Record<string, unknown>;
+  if (params.tool === LOAD_SKILL) {
+    return context.loadSkill(String(args.name ?? ''), { inline: true });
+  }
+  if (params.tool === READ_SKILL_REFERENCE) {
+    return context.readReference(String(args.skill ?? ''), String(args.path ?? ''));
+  }
+  return { ok: false, text: `No tool named ${String(params.tool)}.` };
 }
 
 function fileChanges(item: JsonObject): FileChange[] {

@@ -1,4 +1,5 @@
 import type { PolarisConfig } from '../config/config.ts';
+import type { ContextManager } from '../context/manager.ts';
 import type { PermissionGate } from '../permissions/gate.ts';
 import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
 import {
@@ -23,6 +24,8 @@ export interface SessionOptions {
   readonly config: PolarisConfig;
   /** The one gate every mutation in this session is authorised through. */
   readonly gate: PermissionGate;
+  /** Project instructions and skills; each session gets its own view of them. */
+  readonly context?: ContextManager;
 }
 
 /**
@@ -38,11 +41,18 @@ export class Session {
   #model: ModelSession | null = null;
   #access: ToolAccess | null = null;
   readonly #gate: PermissionGate;
+  readonly #context: ContextManager | undefined;
 
   constructor(options: SessionOptions) {
     this.cwd = options.cwd;
     this.config = options.config;
     this.#gate = options.gate;
+    this.#context = options.context;
+  }
+
+  /** See `ModelSession.liveInstructions`. */
+  get liveInstructions(): boolean {
+    return this.#model?.liveInstructions === true;
   }
 
   get permissions(): PermissionProfile {
@@ -87,6 +97,7 @@ export class Session {
       cwd: this.cwd,
       permissions: this.permissions,
       gate: this.#gate,
+      ...(this.#context ? { context: this.#context.session() } : {}),
       ...(this.config.model ? { model: this.config.model } : {}),
       ...(this.config.effort ? { effort: this.config.effort } : {}),
     });
