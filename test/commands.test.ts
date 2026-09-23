@@ -79,6 +79,7 @@ test('the registry resolves names and aliases and lists every command', () => {
   assert.deepEqual(
     commands.list().map((command) => command.name),
     [
+      'activity',
       'checkpoint',
       'checkpoints',
       'clear',

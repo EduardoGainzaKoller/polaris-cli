@@ -10,7 +10,7 @@ import { debug } from '../../core/logger.ts';
 import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
 import type { PermissionProfile } from '../../permissions/policy.ts';
 import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
-import { toolFinished, toolResultText, toolStarted } from '../../tools/events.ts';
+import { streamOutput, toolFinished, toolResultText, toolStarted } from '../../tools/events.ts';
 import { MAX_TOOL_ROUNDS } from '../../tools/limits.ts';
 import { createRegistry, polarisAccess } from '../../tools/registry.ts';
 import type {
@@ -174,6 +174,9 @@ export const anthropicApiProvider: ModelProvider = {
             }
 
             partial = '';
+            // A request is in flight: after a tool round this is "waiting for
+            // the model" again, not the tool still running.
+            options.activity?.waiting('model');
             const stream = client.messages.stream(
               {
                 model,
@@ -186,6 +189,7 @@ export const anthropicApiProvider: ModelProvider = {
               signal ? { signal } : {},
             );
             for await (const event of stream) {
+              options.activity?.pulse();
               if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
                 partial += event.delta.text;
                 yield { type: 'text-delta', text: event.delta.text };
@@ -228,13 +232,14 @@ export const anthropicApiProvider: ModelProvider = {
                 continue;
               }
               yield toolStarted(registry, call.id, call.name, call.input);
-              const streamed: ModelEvent[] = [];
-              const result = await registry.execute(call.name, call.input, {
-                cwd: options.cwd,
-                ...(signal ? { signal } : {}),
-                onOutput: (text) => streamed.push({ type: 'tool-output-delta', id: call.id, text }),
-              });
-              for (const event of streamed) yield event;
+              // A long test run prints as it goes, not all at once at the end.
+              const result = yield* streamOutput(call.id, (onOutput) =>
+                registry.execute(call.name, call.input, {
+                  cwd: options.cwd,
+                  ...(signal ? { signal } : {}),
+                  onOutput,
+                }),
+              );
               results.push({ text: toolResultText(result), error: !result.ok });
               yield toolFinished(call.id, result);
             }

@@ -4,7 +4,7 @@ import { type ContextEvent, ContextManager } from '../context/manager.ts';
 import type { ApprovalDecision, ApprovalRequest } from '../permissions/gate.ts';
 import { PermissionGate } from '../permissions/gate.ts';
 import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
-import type { ModelEvent, ToolAccess } from '../providers/provider.ts';
+import type { ModelEvent, RuntimeActivity, ToolAccess } from '../providers/provider.ts';
 import {
   ChangeTracker,
   type Checkpoint,
@@ -14,6 +14,7 @@ import {
   type UndoPlan,
   type UndoResult,
 } from '../workspace/changes.ts';
+import { type Activity, ActivityTracker, type Outcome, took } from './activity.ts';
 import { PolarisError, toUserMessage } from './errors.ts';
 import { debug } from './logger.ts';
 import { Session } from './session.ts';
@@ -56,8 +57,10 @@ export interface ToolCall {
   readonly detail?: string;
   /** A person refused it, which reads differently from a failure. */
   readonly denied?: boolean;
-  /** Live output while it runs; kept to the last few lines for the UI. */
-  readonly output?: string;
+  /** How long it took, once finished. */
+  readonly duration?: number;
+  /** A command's last line of output, e.g. `BUILD SUCCESSFUL`. */
+  readonly lastOutput?: string;
 }
 
 export interface UiMessage {
@@ -103,6 +106,11 @@ export interface AppState {
   readonly approval: ApprovalRequest | null;
   readonly workspace: WorkspaceState;
   readonly context: ContextState;
+  /**
+   * What is running right now, parents before children. Completed work is
+   * not here: it is a transcript row with its duration.
+   */
+  readonly activity: readonly Activity[];
 }
 
 /** Project instructions and skills, as the UI shows them. */
@@ -138,6 +146,18 @@ export class PolarisApp {
   #tracker: ChangeTracker | null = null;
   readonly #verifier = new Verifier();
   readonly #context: ContextManager;
+  readonly #activity: ActivityTracker;
+  /** The model activity of the running turn, which runtime signs of life belong to. */
+  #turnActivity: string | null = null;
+  /** What providers call when their runtime shows a sign of life. */
+  readonly #runtimeActivity: RuntimeActivity = {
+    pulse: () => this.#activity.touch(this.#turnActivity),
+    waiting: (on) =>
+      this.#activity.touch(
+        this.#turnActivity,
+        on === 'model' ? 'waiting-model' : 'waiting-runtime',
+      ),
+  };
   /** Transcript entries of skills still loading, by name. */
   readonly #loadingSkills = new Map<string, string>();
 
@@ -147,8 +167,12 @@ export class PolarisApp {
     approvals?: boolean;
     /** Polaris's home, where user skills live; `~/.polaris` by default. */
     home?: string;
+    /** The activity clock; tests pass their own. */
+    clock?: () => number;
   }) {
     this.cwd = options.cwd;
+    this.#activity = new ActivityTracker(options.clock);
+    this.#activity.onChange(() => this.#emit());
     this.#context = new ContextManager({
       workspace: options.cwd,
       boundary: null,
@@ -172,6 +196,7 @@ export class PolarisApp {
         config: this.#config,
         gate: this.#gate,
         context: this.#context,
+        activity: this.#runtimeActivity,
       });
       return;
     }
@@ -181,9 +206,20 @@ export class PolarisApp {
     this.#gate.onApproval(
       (request) =>
         new Promise<ApprovalDecision>((resolve) => {
+          // Waiting on a person, on purpose: never reported as a silence.
+          const waiting = this.#activity.start(
+            'approval',
+            `${request.title} ${request.target}`.trim(),
+            {
+              state: 'waiting-approval',
+              ...(this.#turnActivity ? { parentId: this.#turnActivity } : {}),
+            },
+          );
           this.#approval = {
             request,
             answer: (decision) => {
+              this.#activity.finish(waiting, decision === 'allow' ? 'completed' : 'cancelled');
+              this.#activity.touch(this.#turnActivity);
               this.#approval = null;
               this.#set(this.#turn ? 'thinking' : 'ready');
               resolve(decision);
@@ -229,6 +265,7 @@ export class PolarisApp {
       permissions: this.#gate.profile,
       approval: this.#approval?.request ?? null,
       workspace: this.#workspace(),
+      activity: this.#activity.live(),
       context: {
         sources: this.#context.project.sources.map((source) => source.display),
         available: this.#context.skills.list().length,
@@ -396,7 +433,7 @@ export class PolarisApp {
     await this.#run(text, false);
   }
 
-  async #run(text: string, report: boolean): Promise<void> {
+  async #run(text: string, report: boolean, parent?: string): Promise<void> {
     if (this.#turn) return;
     this.#append('user', text, 'complete');
 
@@ -404,6 +441,11 @@ export class PolarisApp {
     this.#turn = controller;
     this.#set('thinking');
     const startedAt = Date.now();
+    const turnActivity = this.#activity.start('model', runtimeName(this.#session.providerId), {
+      state: 'waiting-model',
+      ...(parent ? { parentId: parent } : {}),
+    });
+    this.#turnActivity = turnActivity;
     // Whatever changed while Polaris was idle is the user's, and is set aside
     // before the turn can be blamed for it.
     await this.#observe('user');
@@ -413,8 +455,8 @@ export class PolarisApp {
     let answer: string | null = null;
     /** The last answer of the turn, which gets the model and timing footer. */
     let lastAnswer: string | null = null;
-    /** Provider tool id → transcript entry, for tools still running. */
-    const running = new Map<string, { entry: string; name: string }>();
+    /** Provider tool id → transcript entry and activity, for tools still running. */
+    const running = new Map<string, { entry: string; name: string; activity: string }>();
 
     const seal = (state: MessageState) => {
       if (answer) this.#update(answer, (message) => ({ ...message, state }));
@@ -431,6 +473,7 @@ export class PolarisApp {
             answer ??= this.#append('assistant', '', 'streaming').id;
             lastAnswer = answer;
             this.#status = 'streaming';
+            this.#activity.touch(turnActivity, 'streaming');
             const id = answer;
             this.#update(id, (message) => ({ ...message, text: message.text + event.text }));
             break;
@@ -444,13 +487,24 @@ export class PolarisApp {
               checked = true;
             }
             const entry = this.#appendTool(event);
-            running.set(event.id, { entry, name: event.name });
+            const child = this.#activity.start(
+              event.name === 'Run' ? 'command' : 'tool',
+              event.target,
+              {
+                state: 'running',
+                parentId: turnActivity,
+                tool: event.name,
+              },
+            );
+            this.#activity.touch(turnActivity, 'waiting-tool');
+            running.set(event.id, { entry, name: event.name, activity: child });
             this.#set(activity(running));
             break;
           }
           case 'tool-output-delta': {
-            const call = running.get(event.id);
-            if (call) this.#appendOutput(call.entry, event.text);
+            // Only the activity keeps it, trimmed to a few lines: the UI is a
+            // window, and what the model reads is the tool's own result.
+            this.#activity.output(running.get(event.id)?.activity, event.text);
             break;
           }
           case 'tool-result':
@@ -471,6 +525,8 @@ export class PolarisApp {
             // unexpected, but does not make the check stale by existing.
             // Reads cannot change anything, so they cost no Git call.
             if (!READS.has(name)) await this.#observe('polaris', check);
+            // With every tool back, the next thing is the model again.
+            this.#activity.touch(turnActivity, running.size > 0 ? 'waiting-tool' : 'waiting-model');
             this.#set(running.size > 0 ? activity(running) : 'thinking');
             break;
           }
@@ -481,12 +537,26 @@ export class PolarisApp {
         const meta = this.#turnFooter(Date.now() - startedAt);
         this.#update(lastAnswer, (message) => ({ ...message, meta }));
       }
+      this.#activity.finish(turnActivity, 'completed');
       this.#set('ready');
     } catch (error) {
       // Whatever was still running never finished.
-      for (const { entry } of running.values()) {
-        this.#update(entry, (message) => ({ ...message, state: 'cancelled' }));
+      const outcome: Outcome = controller.signal.aborted ? 'cancelled' : 'failed';
+      for (const call of running.values()) {
+        const ended = this.#activity.finish(call.activity, 'cancelled');
+        const duration = ended?.endedAt === undefined ? undefined : ended.endedAt - ended.startedAt;
+        this.#update(call.entry, (message) => ({
+          ...message,
+          state: 'cancelled',
+          tool: {
+            ...(message.tool as ToolCall),
+            ...(duration === undefined
+              ? {}
+              : { duration, detail: `cancelled after ${took(duration)}` }),
+          },
+        }));
       }
+      this.#activity.finish(turnActivity, outcome);
       if (controller.signal.aborted) {
         if (answer) seal('cancelled');
         else this.notice('Cancelled.');
@@ -497,6 +567,7 @@ export class PolarisApp {
         this.#set('error');
       }
     } finally {
+      this.#turnActivity = null;
       stopSealing();
       this.#verifier.cancelRunning();
       await this.#observe('polaris');
@@ -526,7 +597,14 @@ export class PolarisApp {
   async verify(): Promise<void> {
     this.#idle();
     await this.#observe('user');
-    await this.#run(verifyPrompt(this.#tracker?.changes() ?? []), true);
+    const verification = this.#activity.start('verification', 'Verify changes', {
+      state: 'running',
+    });
+    try {
+      await this.#run(verifyPrompt(this.#tracker?.changes() ?? []), true, verification);
+    } finally {
+      this.#activity.finish(verification, 'completed');
+    }
   }
 
   /** Session changes and the user's own, as of now. */
@@ -649,7 +727,7 @@ export class PolarisApp {
   }
 
   #finishTool(
-    running: Map<string, { entry: string; name: string }>,
+    running: Map<string, { entry: string; name: string; activity: string }>,
     event: Extract<ModelEvent, { type: 'tool-result' | 'tool-error' }>,
   ): void {
     const call = running.get(event.id);
@@ -657,40 +735,34 @@ export class PolarisApp {
     running.delete(event.id);
     const failed = event.type === 'tool-error';
     const denied = failed && event.denied === true;
+    const exited = (event.exitCode ?? 0) !== 0;
+    const ended = this.#activity.finish(
+      call.activity,
+      denied ? 'cancelled' : failed ? 'failed' : 'completed',
+    );
+    const duration = ended?.endedAt === undefined ? undefined : ended.endedAt - ended.startedAt;
+    const lastOutput = ended?.tail.findLast((line) => line.trim().length > 0)?.trim();
     this.#update(call.entry, (message) => ({
       ...message,
       // A refusal is its own state: the model was stopped, nothing broke.
-      state: denied ? 'cancelled' : failed ? 'error' : 'complete',
+      state: denied ? 'cancelled' : failed || exited ? 'error' : 'complete',
       tool: {
         ...(message.tool as ToolCall),
         detail: failed ? event.error : event.summary,
         ...(denied ? { denied: true } : {}),
+        ...(duration === undefined ? {} : { duration }),
+        ...(lastOutput ? { lastOutput } : {}),
       },
     }));
-  }
-
-  /**
-   * Live tool output, trimmed to the last few lines. The UI is a window, not a
-   * log: keeping the whole stream here would grow the transcript without
-   * bound, and what the model receives is the tool's result, not this.
-   */
-  #appendOutput(id: string, text: string): void {
-    this.#update(id, (message) => {
-      const combined = `${message.tool?.output ?? ''}${text}`;
-      const lines = combined.split(/\r?\n/);
-      return {
-        ...message,
-        tool: {
-          ...(message.tool as ToolCall),
-          output: lines.slice(-MAX_LIVE_OUTPUT_LINES).join('\n'),
-        },
-      };
-    });
   }
 
   /** Ctrl+C: cancels the running turn only. Returns false when nothing was running. */
   cancel(): boolean {
     if (!this.#turn) return false;
+    // A second Ctrl+C while the first is still being honoured changes nothing.
+    if (this.#turn.signal.aborted) return true;
+    // Said until the runtime or process has actually stopped, not before.
+    this.#activity.cancelling();
     this.#turn.abort();
     return true;
   }
@@ -785,7 +857,13 @@ export class PolarisApp {
   async #swap(config: PolarisConfig, what: string, notice?: string): Promise<void> {
     const previous = this.#session;
     this.#set('switching');
-    const next = new Session({ cwd: this.cwd, config, gate: this.#gate, context: this.#context });
+    const next = new Session({
+      cwd: this.cwd,
+      config,
+      gate: this.#gate,
+      context: this.#context,
+      activity: this.#runtimeActivity,
+    });
     try {
       await next.start();
     } catch (error) {
@@ -833,8 +911,16 @@ export class PolarisApp {
 /** Tools that only look; the turn-end reconcile still catches anything they missed. */
 const READS = new Set(['Read', 'Grep', 'Glob', 'List']);
 
-/** Live tool output lines kept in the transcript while a command runs. */
-const MAX_LIVE_OUTPUT_LINES = 8;
+/** How a runtime is named in the activity view. */
+function runtimeName(provider: string): string {
+  const names: Record<string, string> = {
+    codex: 'Codex',
+    claude: 'Claude',
+    'anthropic-api': 'Anthropic API',
+    mock: 'Mock',
+  };
+  return names[provider] ?? provider;
+}
 
 /** A single word for the status bar, however many tools are running. */
 function activity(running: ReadonlyMap<string, { name: string }>): AppStatus {

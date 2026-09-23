@@ -46,6 +46,9 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
       const connection = await connect();
       const turns = new TurnRouter(options.cwd);
       connection.onNotification((method, params) => {
+        // Any notification is the runtime being alive: reasoning, plans, token
+        // counts — none of them rendered, all of them real.
+        options.activity?.pulse();
         if (method === 'thread/tokenUsage/updated') tokens = toTokens(params) ?? tokens;
         else if (method === 'account/rateLimits/updated') {
           rateLimits = (params as RateLimitsResponse).rateLimits ?? rateLimits;

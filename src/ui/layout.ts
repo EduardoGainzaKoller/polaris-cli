@@ -1,10 +1,11 @@
+import { took } from '../core/activity.ts';
 import type { AppState, AppStatus, UiMessage, WorkspaceState } from '../core/app.ts';
 import { shortenPath } from './output.ts';
 
 /** Pure layout maths — no ANSI, no Ink — so it can be unit-tested directly. */
 
 export interface TranscriptLine {
-  readonly kind: 'blank' | 'user' | 'text' | 'meta' | 'tool' | 'detail' | 'output' | 'notice';
+  readonly kind: 'blank' | 'user' | 'text' | 'meta' | 'tool' | 'detail' | 'notice';
   readonly role: UiMessage['role'];
   readonly state: UiMessage['state'];
   readonly text: string;
@@ -13,9 +14,6 @@ export interface TranscriptLine {
   /** Short outcome shown at the right edge of a tool row. */
   readonly aside?: string;
 }
-
-/** Live command output rows kept under a running tool. */
-const OUTPUT_ROWS = 6;
 
 /** Wraps on word boundaries, keeps explicit newlines, never loses characters. */
 export function wrapText(text: string, width: number): string[] {
@@ -70,10 +68,14 @@ export function transcriptLines(messages: readonly UiMessage[], width: number): 
     previous = message;
 
     if (role === 'tool' && message.tool) {
-      const { name, target, detail, denied, output } = message.tool;
-      const outcome = denied ? 'denied' : state === 'cancelled' ? 'cancelled' : detail;
-      // A short success fits beside the row; errors and long outcomes go below.
-      const beside = state === 'complete' && outcome && outcome.length <= 24 ? outcome : undefined;
+      const { name, target, detail, denied, duration, lastOutput } = message.tool;
+      const cancelled = detail?.startsWith('cancelled') ? detail : 'cancelled';
+      const outcome = denied ? 'denied' : state === 'cancelled' ? cancelled : detail;
+      // A short success fits beside the row, with how long it took; errors
+      // and long outcomes go below. Live progress is the activity panel's.
+      const short = state === 'complete' && outcome && outcome.length <= 24 ? outcome : undefined;
+      const timing = duration !== undefined && state !== 'cancelled' ? took(duration) : undefined;
+      const beside = [short, timing].filter(Boolean).join(' · ') || undefined;
       const room = Math.max(8, width - name.length - 4 - (beside ? beside.length + 2 : 0));
       const [first = '', ...rest] = wrapText(target, room);
       push({
@@ -85,14 +87,12 @@ export function transcriptLines(messages: readonly UiMessage[], width: number): 
         ...(beside ? { aside: beside } : {}),
       });
       for (const text of rest) push({ kind: 'detail', role, state, text });
-      // A command's own output while it runs, so a long test suite is not a
-      // blank screen. It is replaced by the outcome once the tool finishes.
-      if (output && state === 'streaming') {
-        for (const line of output.split('\n').slice(-OUTPUT_ROWS)) {
-          push({ kind: 'output', role, state, text: line.slice(0, Math.max(8, width - 4)) });
-        }
+      // A command's last line says how it ended — BUILD SUCCESSFUL — more
+      // plainly than its exit code does.
+      if (lastOutput && lastOutput !== outcome) {
+        push({ kind: 'detail', role, state, text: lastOutput.slice(0, Math.max(8, width - 4)) });
       }
-      if (outcome && !beside) {
+      if (outcome && !short) {
         for (const text of wrapText(outcome, Math.max(8, width - 4))) {
           push({ kind: 'detail', role, state, text });
         }

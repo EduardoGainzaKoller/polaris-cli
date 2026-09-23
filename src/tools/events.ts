@@ -40,3 +40,44 @@ export function toolResultText(result: ToolCallResult): string {
   // offers an alternative instead of retrying the same call.
   return result.denied ? result.error : `Error: ${result.error}`;
 }
+
+/**
+ * Runs a tool and yields its output as it arrives, then returns its result.
+ * A generator cannot yield from inside a callback, so output is queued and
+ * the generator wakes for each chunk — live, rather than all at the end.
+ */
+export async function* streamOutput<T>(
+  id: string,
+  run: (onOutput: (text: string) => void) => Promise<T>,
+): AsyncGenerator<ModelEvent, T> {
+  const queue: string[] = [];
+  let settled = false;
+  let wake: (() => void) | null = null;
+  const nudge = () => {
+    const resolve = wake;
+    wake = null;
+    resolve?.();
+  };
+  const work = run((text) => {
+    queue.push(text);
+    nudge();
+  });
+  work.then(
+    () => {
+      settled = true;
+      nudge();
+    },
+    () => {
+      settled = true;
+      nudge();
+    },
+  );
+  while (true) {
+    while (queue.length > 0) yield { type: 'tool-output-delta', id, text: queue.shift() as string };
+    if (settled) break;
+    await new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+  }
+  return await work;
+}

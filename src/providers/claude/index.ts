@@ -235,6 +235,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
             frames ??= claude[Symbol.asyncIterator]();
             while (true) {
               const frame = await frames.next();
+              session.activity?.pulse();
               if (frame.done) break;
               const message = frame.value;
               if (message.type === 'system' && message.subtype === 'init') {

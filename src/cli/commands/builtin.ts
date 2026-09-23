@@ -1,4 +1,5 @@
 import { configPath, saveConfig } from '../../config/config.ts';
+import { type Activity, ago, clock } from '../../core/activity.ts';
 import type { AppState } from '../../core/app.ts';
 import { usageLines } from '../../core/usage.ts';
 import { RESULT_LABEL } from '../../core/verification.ts';
@@ -11,6 +12,7 @@ import {
 import { listProviders } from '../../providers/provider.ts';
 import { MAX_SESSION_DIFF_LINES } from '../../tools/limits.ts';
 import { capabilityOf } from '../../tools/registry.ts';
+import { statusOf } from '../../ui/activity.ts';
 import { shortenPath } from '../../ui/output.ts';
 import type { CommandRegistry } from './registry.ts';
 import type { Command, CommandContext } from './types.ts';
@@ -47,6 +49,7 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
           ...(usage?.plan ? [`  plan      ${usage.plan}`] : []),
           `  turns     ${state.turns}`,
           `  session   ${state.status === 'error' ? 'error' : 'active'}`,
+          `  activity  ${activityRow(state.activity)}`,
           ...contextRows(state.context),
           '',
           ...workspaceRows(state.workspace),
@@ -350,6 +353,37 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       },
     },
     {
+      name: 'activity',
+      summary: 'Show what is running right now, and since when',
+      run({ app }) {
+        const live = app.state.activity;
+        if (live.length === 0) {
+          app.notice('No active operations.');
+          return;
+        }
+        const now = Date.now();
+        const lines = ['  Activity'];
+        const depth = (activity: Activity): number => {
+          const parent = live.find((item) => item.id === activity.parentId);
+          return parent ? depth(parent) + 1 : 0;
+        };
+        for (const activity of live) {
+          const pad = '  '.repeat(depth(activity) + 1);
+          const leaf = !live.some((child) => child.parentId === activity.id);
+          lines.push(
+            '',
+            `${pad}${activity.kind === 'command' ? `Run ${activity.label}` : activity.label}`,
+            `${pad}  state          ${activity.state}`,
+            `${pad}  elapsed        ${clock(now - activity.startedAt)}`,
+            `${pad}  last activity  ${ago(now - activity.lastActivityAt)} ago`,
+          );
+          const status = statusOf(activity, now, leaf);
+          if (status) lines.push(`${pad}  ${status}`);
+        }
+        app.notice(lines.join('\n'));
+      },
+    },
+    {
       name: 'context',
       blockedByApproval: true,
       summary: 'Project instructions from POLARIS.md: /context [show|reload]',
@@ -461,6 +495,15 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       },
     },
   ];
+}
+
+/** `./gradlew test (00:42)`, or idle. */
+function activityRow(live: readonly Activity[]): string {
+  const leaf = [...live]
+    .reverse()
+    .find((item) => !live.some((child) => child.parentId === item.id));
+  if (!leaf) return 'idle';
+  return `${leaf.label} (${clock(Date.now() - leaf.startedAt)})`;
 }
 
 /** The project-context and skill rows of /status. */

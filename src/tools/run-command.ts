@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
+import { debug } from '../core/logger.ts';
 import {
   COMMAND_OUTPUT_HEAD_LINES,
   COMMAND_OUTPUT_TAIL_LINES,
@@ -116,8 +117,7 @@ export const runCommandTool: ToolDefinition<RunCommandInput> = {
       ]
         .filter((part) => part !== '')
         .join('\n'),
-      summary:
-        result.exitCode === 0 ? `done in ${seconds}s` : `exit ${result.exitCode} · ${seconds}s`,
+      summary: `exit ${result.exitCode}`,
       metadata: {
         command: input.command,
         cwd: where.display,
@@ -158,6 +158,7 @@ function runProcess(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    debug('command', 'started pid', child.pid, 'in', cwd);
     let stdout = '';
     let stderr = '';
     let output = '';
@@ -198,6 +199,7 @@ function runProcess(
     });
 
     child.on('close', (code, killedBy) => {
+      debug('command', 'pid', child.pid, 'exited', code ?? killedBy);
       if (settled) return;
       settled = true;
       done();

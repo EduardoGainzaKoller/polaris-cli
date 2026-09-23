@@ -2,6 +2,7 @@ import type { PolarisConfig } from '../config/config.ts';
 import type { ContextManager } from '../context/manager.ts';
 import type { PermissionGate } from '../permissions/gate.ts';
 import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
+import type { RuntimeActivity } from '../providers/provider.ts';
 import {
   getProvider,
   type ModelEvent,
@@ -26,6 +27,7 @@ export interface SessionOptions {
   readonly gate: PermissionGate;
   /** Project instructions and skills; each session gets its own view of them. */
   readonly context?: ContextManager;
+  readonly activity?: RuntimeActivity;
 }
 
 /**
@@ -42,12 +44,14 @@ export class Session {
   #access: ToolAccess | null = null;
   readonly #gate: PermissionGate;
   readonly #context: ContextManager | undefined;
+  readonly #activity: RuntimeActivity | undefined;
 
   constructor(options: SessionOptions) {
     this.cwd = options.cwd;
     this.config = options.config;
     this.#gate = options.gate;
     this.#context = options.context;
+    this.#activity = options.activity;
   }
 
   /** See `ModelSession.liveInstructions`. */
@@ -98,6 +102,7 @@ export class Session {
       permissions: this.permissions,
       gate: this.#gate,
       ...(this.#context ? { context: this.#context.session() } : {}),
+      ...(this.#activity ? { activity: this.#activity } : {}),
       ...(this.config.model ? { model: this.config.model } : {}),
       ...(this.config.effort ? { effort: this.config.effort } : {}),
     });

@@ -1,6 +1,6 @@
 import { PolarisError } from '../../core/errors.ts';
 import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
-import { toolFinished, toolStarted } from '../../tools/events.ts';
+import { streamOutput, toolFinished, toolStarted } from '../../tools/events.ts';
 import { createRegistry, polarisAccess } from '../../tools/registry.ts';
 import type {
   ModelEvent,
@@ -130,15 +130,14 @@ export const mockProvider: ModelProvider = {
           const id = `mock-tool-${++calls}`;
           yield toolStarted(registry, id, name, toolInput);
 
-          // Output arriving while the tool runs is queued and drained after
-          // it, because a generator cannot yield from a callback.
-          const streamed: ModelEvent[] = [];
-          const result = await registry.execute(name, toolInput, {
-            cwd: options.cwd,
-            ...(signal ? { signal } : {}),
-            onOutput: (text) => streamed.push({ type: 'tool-output-delta', id, text }),
-          });
-          for (const event of streamed) yield event;
+          // Output is yielded while the tool runs, not after it.
+          const result = yield* streamOutput(id, (onOutput) =>
+            registry.execute(name, toolInput, {
+              cwd: options.cwd,
+              ...(signal ? { signal } : {}),
+              onOutput,
+            }),
+          );
           yield toolFinished(id, result);
         }
 

@@ -9,7 +9,7 @@ Every operation that changes something is shown to you before it happens — the
 diff, the exact command — and waits for you to allow or deny it.
 
 ```text
- ✦ my-project                                                              v0.8.0
+ ✦ my-project                                                              v0.8.1
 
   ┃
   ┃ Añade validación a createUser y ejecuta los tests
@@ -434,12 +434,45 @@ Loaded skills last for the conversation. `/new` clears them and keeps `POLARIS.m
 and `/skill unload` apply to the next message; the Claude and Codex runtimes fix them when
 the session starts, so there both start a new conversation — and Polaris says so.
 
+## Execution feedback
+
+A long operation never shows only a spinner. Above the input, Polaris shows what is
+running, as a small tree, from events that actually happened:
+
+```text
+⠼ Codex                                                    01:38
+  running tools
+  └─ ⠼ Run ./gradlew test                                  00:52
+       last output 5s ago
+       > Task :compileJava
+       > Task :test
+```
+
+- **Elapsed time** for every running operation, and how long each finished one took
+  (`● Grep "ModelProvider"   8 matches · 0.4s`).
+- **What it is waiting for**: the model's response, a tool, a process, or you — an
+  approval is never counted as a silence.
+- **Recent command output**: the last few lines, stdout and stderr, as they arrive. This
+  is only what you see; the model still gets the command's full (or truncated) result.
+- **Inactivity, stated plainly**: after a while without events the line changes to `no
+  new output for 43s · still active`, and past a minute adds `may be slow or stalled`.
+  Polaris never claims something is stuck, never invents a "thinking…" message, and never
+  cancels on its own. "Last activity" moves only when something real arrives — output, a
+  runtime notification, a streamed token — never on a timer.
+- **Cancellation**: Ctrl+C shows `cancelling…` until the process or runtime has actually
+  stopped, then `cancelled after 42.1s`; the session stays usable.
+
+The status bar carries the short version (`./gradlew test · 00:47`, `waiting for model ·
+00:18`, `waiting for approval`), `/activity` prints the details, and `/status` includes
+the current activity.
+
 ## Commands
 
 | Command | Description |
 | --- | --- |
 | `/help` | Show available commands |
 | `/status` | The session, plus how much of the model you have used: plan, limits, tokens |
+| `/activity` | What is running right now: state, elapsed time, last activity |
 | `/tools` | Show every tool and whether it is automatic, asks, or is denied |
 | `/provider [id]` | Switch provider — with no id, pick one from a list |
 | `/model [id]` | Switch model — with no id, pick from what the provider reports |
@@ -515,6 +548,7 @@ src/
     app.ts             PolarisApp — headless controller: transcript, status, switching
     session.ts         cwd, turn lifecycle over one provider session
     verification.ts    which checks ran against which state of the workspace
+    activity.ts        ActivityTracker: what is running, since when, last sign of life
     errors.ts          PolarisError = message safe to show the user
     logger.ts          debug logging (stderr, or a file while the TUI owns the terminal)
   cli/

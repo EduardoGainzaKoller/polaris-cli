@@ -29,6 +29,19 @@ export interface ProviderSessionOptions {
    * Absent in sessions that carry no project context (most tests).
    */
   readonly context?: SessionContext;
+  /**
+   * Signs of life from the runtime, for the activity view. A provider calls
+   * `pulse()` when something real arrives that is not itself a `ModelEvent`
+   * (a runtime notification, a stream frame), and `waiting('model')` when it
+   * sends a request and is now waiting for the answer. Never on a timer, and
+   * never a message sent to the model just to see if it answers.
+   */
+  readonly activity?: RuntimeActivity;
+}
+
+export interface RuntimeActivity {
+  pulse(): void;
+  waiting(on: 'model' | 'runtime'): void;
 }
 
 /**

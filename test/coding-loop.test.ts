@@ -33,8 +33,12 @@ function polaris(permissions: PermissionProfile = 'ask'): PolarisApp {
 /** Answers approvals as they appear, the way a person at the keyboard would. */
 function answerWith(app: PolarisApp, decide: (request: { title: string }) => 'allow' | 'deny') {
   const seen: string[] = [];
+  let last: unknown = null;
   const stop = app.subscribe((state) => {
-    if (!state.approval) return;
+    // Every state update while the card is open carries the same request;
+    // a person answers it once.
+    if (!state.approval || state.approval === last) return;
+    last = state.approval;
     seen.push(`${state.approval.title} ${state.approval.target}`);
     const decision = decide(state.approval);
     queueMicrotask(() => app.resolveApproval(decision));
@@ -100,6 +104,7 @@ test('read-only makes the mutation impossible, not merely discouraged', async ()
   const stop = app.subscribe((state) => {
     if (state.approval) asked += 1;
   });
+  // (Any approval at all fails this test, however many updates carried it.)
   const before = await readFile(join(workspace, 'src', 'hello.ts'), 'utf8');
 
   await app.submit("@edit(src/hello.ts :: 'hi' :: 'wiped') @run(node -e \"console.log(1)\") va");
@@ -148,15 +153,14 @@ test('a write outside the workspace is refused under every profile', async () =>
   }
 });
 
-test('live command output reaches the transcript while the command runs', async () => {
+test('live command output reaches the activity view while the command runs', async () => {
   const app = polaris('workspace-write');
   await app.start();
   const answers = answerWith(app, () => 'allow');
   const streaming: string[] = [];
   const stop = app.subscribe((state) => {
-    for (const message of state.messages) {
-      if (message.state === 'streaming' && message.tool?.output)
-        streaming.push(message.tool.output);
+    for (const activity of state.activity) {
+      if (activity.kind === 'command') streaming.push(activity.tail.join('\n'));
     }
   });
 
@@ -177,8 +181,9 @@ test('a failing command is a result the loop can act on', async () => {
 
   await app.submit('@run(node -e "process.exit(3)") y?');
   const [call] = tools(app.state.messages);
-  // Not an error state: the command failed, the tool worked.
-  assert.equal(call?.state, 'complete');
+  // Drawn as a failed row, but the turn carries on: the command failed, the
+  // tool worked, and the model reads the output to decide what to do.
+  assert.equal(call?.state, 'error');
   assert.match(call?.tool?.detail ?? '', /exit 3/);
   assert.equal(app.state.status, 'ready');
   answers.stop();

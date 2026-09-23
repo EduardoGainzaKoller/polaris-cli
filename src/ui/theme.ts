@@ -40,3 +40,14 @@ export const theme = {
   warn: paint('yellow'),
   ok: paint('green'),
 };
+
+/**
+ * How live activity reads. Quiet is amber, not red: a long silence is worth a
+ * glance, not an alarm, and every state is also said in words.
+ */
+export const activityTone = {
+  active: palette.accent,
+  quiet: palette.warning,
+  approval: palette.secondary,
+  cancelling: palette.warning,
+} as const;

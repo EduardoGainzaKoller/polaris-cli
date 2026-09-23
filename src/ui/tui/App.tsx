@@ -6,6 +6,7 @@ import { withEntry } from '../../config/history.ts';
 import type { AppState, PolarisApp } from '../../core/app.ts';
 import { toUserMessage } from '../../core/errors.ts';
 import { VERSION } from '../../version.ts';
+import { activityRows, activitySummary } from '../activity.ts';
 import {
   clamp,
   footerHints,
@@ -17,7 +18,9 @@ import {
 } from '../layout.ts';
 import { shortenPath } from '../output.ts';
 import { palette } from '../theme.ts';
+import { ActivityPanel } from './ActivityPanel.tsx';
 import { Approval } from './Approval.tsx';
+import { useClock } from './Clock.tsx';
 import { Composer } from './Composer.tsx';
 import { Confirm } from './Confirm.tsx';
 import { Home } from './Home.tsx';
@@ -83,6 +86,11 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
   }, [stdout]);
 
   const spinner = useSpinner(state.busy);
+  // One clock for every live activity; it stops when nothing is running.
+  const now = useClock(state.activity.length > 0);
+  const activity = useMemo(() => activityRows(state.activity, now), [state.activity, now]);
+  // Approvals have their own card; the panel shows the work around them.
+  const panel = approvalShown(state) ? activity.filter((row) => row.tone !== 'approval') : activity;
   const commands = useMemo(
     () => registry.list().map(({ name, summary }) => ({ name, summary })),
     [registry],
@@ -100,7 +108,12 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
   // The card's rows come out of the transcript's, so the whole screen still
   // fits: everything else is fixed height, and the transcript is the only part
   // that can give. Clipping the card instead would hide what is being agreed to.
-  const chrome = HEADER_HEIGHT + FOOTER_HEIGHT + GAP + composerHeight;
+  const chrome =
+    HEADER_HEIGHT +
+    FOOTER_HEIGHT +
+    GAP +
+    composerHeight +
+    (panel.length > 0 ? panel.length + 1 : 0);
   const budget = Math.max(0, size.rows - chrome - MIN_TRANSCRIPT_ROWS);
   const diffRows = approval ? diffRowsFor(approval, budget) : 0;
   const approvalHeight = approval ? APPROVAL_CHROME + (approval.facts?.length ?? 0) + diffRows : 0;
@@ -302,6 +315,14 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
         )}
       </Box>
 
+      {/* What is running: a fixed, capped block, so the transcript above
+          keeps its scroll position while clocks tick. */}
+      {panel.length > 0 ? (
+        <Box marginTop={1} flexShrink={0} width="100%">
+          <ActivityPanel rows={panel} spinner={spinner} />
+        </Box>
+      ) : null}
+
       {/* Composer */}
       <Box height={GAP} />
       <Box justifyContent="center">{composer}</Box>
@@ -309,7 +330,9 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
       {/* Footer */}
       <Box height={FOOTER_HEIGHT}>
         {state.busy ? (
-          <Text color={palette.accent}>{`${spinner} ${statusLabel(state.status)}`}</Text>
+          <Text color={palette.accent} wrap="truncate-end">
+            {`${spinner} ${activitySummary(state.activity, now) || statusLabel(state.status)}`}
+          </Text>
         ) : (
           <Text color={state.status === 'error' ? palette.error : palette.subtle}>
             {`● ${statusLabel(state.status)}`}
@@ -342,6 +365,11 @@ function diffRowsFor(
   const wanted = approval.diff.split('\n').length;
   const room = budget - APPROVAL_CHROME - (approval.facts?.length ?? 0);
   return Math.max(0, Math.min(wanted, room, MAX_CARD_DIFF_ROWS));
+}
+
+/** True when the approval card is on screen, and so already tells the story. */
+function approvalShown(state: AppState): boolean {
+  return state.approval !== null;
 }
 
 function verificationColor(state: AppState['workspace']['verification']): string {
