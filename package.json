@@ -40,5 +40,11 @@
     "react": "^19.3.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EduardoGainzaKoller/polaris-cli.git"
+  },
+  "homepage": "https://github.com/EduardoGainzaKoller/polaris-cli#readme",
+  "author": "Eduardo Gainza"
 }
