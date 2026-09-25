@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { before, test } from 'node:test';
 import { createRegistry, type ToolCallResult } from '../src/tools/registry.ts';
-import { truncateOutput } from '../src/tools/run-command.ts';
+import { environmentFor, truncateOutput } from '../src/tools/run-command.ts';
 import { autoGate } from './helpers.ts';
 
 /**
@@ -218,4 +218,21 @@ test('run_command refuses input it cannot trust and clamps the timeout', async (
   const tool = createRegistry('smart', gate).get('run_command');
   const parsed = tool?.parse({ command: 'x', timeoutMs: 99_999_999 }) as { timeoutMs: number };
   assert.equal(parsed.timeoutMs, 600_000);
+});
+
+test('git runs without a pager, a prompt or an inherited external diff helper', () => {
+  const previous = process.env.GIT_EXTERNAL_DIFF;
+  process.env.GIT_EXTERNAL_DIFF = 'evil-diff-helper';
+  try {
+    const git = environmentFor('git diff --stat');
+    assert.equal(git.GIT_PAGER, 'cat');
+    assert.equal(git.PAGER, 'cat');
+    assert.equal(git.GIT_TERMINAL_PROMPT, '0');
+    assert.equal(git.GIT_EXTERNAL_DIFF, undefined);
+    // Anything else keeps the environment it was approved with.
+    assert.equal(environmentFor('npm test').GIT_EXTERNAL_DIFF, 'evil-diff-helper');
+  } finally {
+    if (previous === undefined) delete process.env.GIT_EXTERNAL_DIFF;
+    else process.env.GIT_EXTERNAL_DIFF = previous;
+  }
 });

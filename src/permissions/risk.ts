@@ -83,8 +83,16 @@ export function classifyCommand(command: string): Classification {
   if (INTERPRETERS.has(name)) {
     return sensitive('interpreter', 'Runs code with an interpreter, which can do anything.');
   }
-  if (name === 'pwd' && args.length === 0) {
-    return { risk: 'safe', category: 'inspection', reason: 'Prints the working directory.' };
+  if (READERS.has(name)) {
+    // Reading like the Read tool does: only paths inside the workspace.
+    const outside = args.find(
+      (arg) =>
+        !arg.startsWith('-') &&
+        (isAbsolute(arg) || /(^|[\\/])\.\.([\\/]|$)/.test(arg) || /^[a-z]:/i.test(arg)),
+    );
+    if (!outside)
+      return { risk: 'safe', category: 'inspection', reason: 'Reads inside the workspace.' };
+    return sensitive('unknown', `Reads a path outside the workspace: ${outside}`);
   }
   return sensitive('unknown', 'Not a command Polaris recognises as safe.');
 }
@@ -287,6 +295,12 @@ function isDestructiveGit(subcommand: string, args: readonly string[]): boolean 
 }
 
 // ------------------------------------------------------------- the rest
+
+/**
+ * Commands that only print what is already there. `find` is not one of them:
+ * `-exec` and `-delete` make it anything but read-only.
+ */
+const READERS = new Set(['ls', 'dir', 'pwd', 'cat', 'head', 'tail', 'wc', 'tree', 'type', 'echo']);
 
 const SHELLS = new Set([
   'bash',

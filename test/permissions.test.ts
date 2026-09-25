@@ -226,7 +226,7 @@ test('project code, interpreters, nested shells, installs, network and deletion 
     ['NODE_OPTIONS=--require=evil.js npm test', 'environment'],
     ['GIT_EXTERNAL_DIFF=evil git diff', 'environment'],
     ['some-unknown-tool --flag', 'unknown'],
-    ['cat package.json', 'unknown'],
+    ['make deploy-prod', 'project-code'],
   ];
   for (const [command, category] of cases) {
     const classification = classifyCommand(command);
@@ -463,4 +463,30 @@ test('without a way to ask, an ask is a denial and nothing is written', async ()
     await readFile(join(workspace, 'src', 'nothing'), 'utf8').catch(() => 'absent'),
     'absent',
   );
+});
+
+test('plain read-only inspection inside the workspace is safe; reaching outside is not', () => {
+  for (const command of [
+    'ls -la',
+    'ls src',
+    'dir',
+    'pwd',
+    'cat package.json',
+    'head -n 20 src/a.ts',
+    'wc -l src/a.ts',
+    'echo done',
+  ]) {
+    assert.equal(risk(command), 'safe', command);
+  }
+  for (const command of [
+    'cat /etc/passwd',
+    'cat ../../secret.txt',
+    'type ..\\..\\secret.txt',
+    'cat C:\\Users\\me\\.ssh\\id_rsa',
+    'find . -delete',
+    'ls; rm -rf src',
+    'cat a > b',
+  ]) {
+    assert.equal(risk(command), 'sensitive', command);
+  }
 });

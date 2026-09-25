@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PolarisError } from '../src/core/errors.ts';
+import { redact } from '../src/core/logger.ts';
 import { Session } from '../src/core/session.ts';
 import { mockProvider } from '../src/providers/mock/index.ts';
 import { getProvider, type ModelEvent, registerProvider } from '../src/providers/provider.ts';
@@ -98,4 +99,13 @@ test('prompting before start fails with a user-facing error', async () => {
 test('unknown provider fails with a user-facing error', async () => {
   const session = new Session({ cwd: '/tmp', config: { provider: 'ghost' } });
   await assert.rejects(() => session.start(), PolarisError);
+});
+
+test('debug output never carries a credential, even a masked one', () => {
+  assert.equal(
+    redact(
+      '401: Incorrect API key provided: sk-svcac******fvMA, and ghp_abcdef123456 and Bearer eyJhbGciOi.x.y',
+    ),
+    '401: Incorrect API key provided: sk-[redacted], and ghp_[redacted] and Bearer [redacted]',
+  );
 });

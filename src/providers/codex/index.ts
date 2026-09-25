@@ -357,6 +357,7 @@ class TurnRouter {
       const turn = params.turn as { id?: string; status?: string; error?: unknown } | undefined;
       const target = this.#route(turn?.id);
       if (!target) return;
+      if (turn?.status === 'failed') debug('codex', 'turn failed', JSON.stringify(turn.error));
       target.push(
         turn?.status === 'failed'
           ? { type: 'failed', detail: detailOf(turn?.error) }
@@ -365,7 +366,12 @@ class TurnRouter {
       return;
     }
     if (method === 'error') {
-      this.#route(turnId)?.push({ type: 'failed', detail: detailOf(params) });
+      debug('codex', 'error notification', JSON.stringify(params));
+      // "Reconnecting… 2/5": Codex is retrying on its own. The turn is still
+      // alive — only an error it will not retry ends it.
+      if (params.willRetry === true) return;
+      // The reason is under `error`: `{ error: { message }, willRetry }`.
+      this.#route(turnId)?.push({ type: 'failed', detail: detailOf(params.error ?? params) });
       return;
     }
     // Long commands print as they go; the UI shows it live, and what the model

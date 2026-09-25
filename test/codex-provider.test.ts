@@ -667,3 +667,39 @@ test('smart: routine Codex requests are answered by the policy, boundaries reach
   assert.equal(asked.length, 3);
   await session.close();
 });
+
+test('an error Codex says it will retry does not end the turn', async () => {
+  const codex = fakeCodex({ replies: [['still ', 'here']], chunkDelayMs: 20 });
+  const session = await createCodexProvider(codex.connect).createSession(testSession('/tmp'));
+  const events = collect(session.send('hola'));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  codex.emit('error', {
+    error: { message: 'Reconnecting... 2/5' },
+    willRetry: true,
+    threadId: THREAD,
+    turnId: 'turn-1',
+  });
+  assert.equal(textOf(await events), 'still here');
+  await session.close();
+});
+
+test('an error Codex will not retry ends the turn with its reason, credentials redacted', async () => {
+  const codex = fakeCodex({ replies: [['x'.repeat(1)]], chunkDelayMs: 50 });
+  const session = await createCodexProvider(codex.connect).createSession(testSession('/tmp'));
+  const events = collect(session.send('hola'));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  codex.emit('error', {
+    error: {
+      message: 'unexpected status 401 Unauthorized: Incorrect API key provided: sk-svcac****fvMA',
+    },
+    willRetry: false,
+    threadId: THREAD,
+    turnId: 'turn-1',
+  });
+  await assert.rejects(events, (error: Error) => {
+    assert.match(error.message, /Codex is not authenticated/);
+    assert.doesNotMatch(error.message, /sk-/);
+    return true;
+  });
+  await session.close();
+});

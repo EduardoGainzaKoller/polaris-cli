@@ -39,5 +39,17 @@ export function debug(scope: string, ...args: unknown[]): void {
 }
 
 function format(args: unknown[]): string {
-  return args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' ');
+  return redact(args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' '));
+}
+
+/**
+ * Credentials never reach a log, even partly masked by the runtime that
+ * reported them: API keys (`sk-…`), GitHub and Slack tokens, bearer headers.
+ */
+export function redact(text: string): string {
+  return text
+    .replace(/\b(sk|pk|rk)-[A-Za-z0-9*._-]{6,}/g, '$1-[redacted]')
+    .replace(/\b(ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_*]{6,}/g, '$1_[redacted]')
+    .replace(/\bxox[abprs]-[A-Za-z0-9*-]{6,}/g, 'xox-[redacted]')
+    .replace(/\b(Bearer)\s+[A-Za-z0-9*._~+/=-]{6,}/gi, '$1 [redacted]');
 }

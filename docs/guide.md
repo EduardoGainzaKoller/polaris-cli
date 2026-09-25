@@ -80,12 +80,18 @@ operation → hard constraints → task authorisation → risk classification �
    model's own output never feeds this: it cannot grant itself write access.
 3. **Risk classification.** Commands are classified by explicit rules, never by substring:
    - **safe** — strict Git inspection (`git status`, `diff`, `log`, `show`, `rev-parse`,
-     `branch --show-current`, `ls-files`), each option checked against an allowlist;
+     `branch --show-current`, `ls-files`), each option checked against an allowlist, and
+     plain reading commands (`ls`, `dir`, `cat`, `head`, `tail`, `wc`, `tree`, `pwd`)
+     whose paths stay inside the workspace;
    - **sensitive** — project code (`npm test`, `./gradlew test`, `pytest`…), interpreters,
      nested shells, package installs, network tools, Git writes, deletion, environment
      prefixes, compound lines (`&&`, `|`, `;`, `>`, `$()`…) and anything unknown;
    - **high risk** — destructive Git (`reset --hard`, `clean -f`, `restore`, forced push)
      and recursive deletion, flagged as such on the card.
+   Every runtime goes through the same decision. With the Claude runtime it is made in the
+   `PreToolUse` hook, which runs for every call — the runtime approves some commands on
+   its own without consulting its permission callback, so the hook is the one place
+   nothing can skip.
 4. **Profile.**
 
 | Profile | Read / Glob / Grep | Write / Edit | Commands |

@@ -5,7 +5,7 @@ an AI can change your code without you losing control of your repository.**
 
 ![Node.js](https://img.shields.io/badge/node-%3E%3D24-339933?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-355%20passing-2ea44f)
+![Tests](https://img.shields.io/badge/tests-362%20passing-2ea44f)
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -63,6 +63,29 @@ and can put everything back.
 - **Never looks frozen.** A live activity view shows what is running, for how long, what it
   is waiting for, the last lines of command output and how long since anything happened —
   built only from real events, never invented "thinking…" messages.
+
+## Smart permissions
+
+Polaris automatically performs the routine actions an authorised task needs, and asks
+only when an operation crosses a risk boundary.
+
+| | read-only | **smart** (default) | workspace-write |
+| --- | --- | --- | --- |
+| Read, search, safe Git inspection | ✓ | ✓ | ✓ |
+| Edits and new files in the workspace | — | ✓ when your request asks for changes, otherwise asks | ✓ |
+| Tests, builds, installs, network, Git writes, unknown commands | — | asks | asks |
+| Destructive Git (`reset --hard`, `clean -f`…) | — | asks, flagged high risk | asks, flagged high risk |
+| Anything outside the workspace | denied | denied | denied |
+
+- *"Analyse UserService"* reads, searches and diffs with no approvals — and has no
+  implicit permission to edit.
+- *"Implement createUser and add tests"* reads, edits and creates files with no approvals,
+  and stops once, when it wants to run the test suite.
+- Commands are classified by explicit rules, never by substring: `git status && rm -rf x`
+  is a compound line, not inspection, and always asks.
+- The workspace boundary is enforced in code; no approval can override it.
+
+The details are in the [guide](docs/guide.md#permissions).
 
 ## Quick start
 
@@ -143,7 +166,7 @@ Every command, flag and behaviour is described in the **[full guide](docs/guide.
 
 - **TypeScript in strict mode** end to end, running on Node 24 — no bundler, no framework
   beyond Ink and React for the terminal UI.
-- **355 tests, fully offline.** Providers are tested against faithful fakes of their real
+- **362 tests, fully offline.** Providers are tested against faithful fakes of their real
   protocols (a local HTTP server speaking the Messages streaming API, a fake Codex App
   Server, a fake Agent SDK runtime), so `npm test` never needs a network, a credential or a
   token of quota.

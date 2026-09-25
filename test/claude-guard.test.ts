@@ -3,8 +3,14 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { before, test } from 'node:test';
+import { PermissionGate } from '../src/permissions/gate.ts';
 import type { PermissionProfile } from '../src/permissions/policy.ts';
-import { workspaceGuard } from '../src/providers/claude/tools.ts';
+import { authorizeTask } from '../src/permissions/task.ts';
+import {
+  type ClaudeDecisions,
+  permissionBridge,
+  workspaceGuard,
+} from '../src/providers/claude/tools.ts';
 
 let workspace: string;
 let outside: string;
@@ -103,4 +109,71 @@ test('only Polaris’s own skill tools pass as MCP; any other server’s tool is
   );
   assert.equal(await decide('mcp__filesystem__write_file', { path: '/etc/passwd' }), 'deny');
   assert.equal(await decide('mcp__polaris__something_else', {}), 'deny');
+});
+
+// ----------------------------------------------- the policy, in the hook
+
+/**
+ * The runtime approves some commands itself (`ls`, `find`, even compound
+ * `git status && …`) without calling canUseTool — so the hook, which runs for
+ * every call, is where Polaris's policy must decide.
+ */
+async function hooked(
+  command: string,
+  answer: 'allow' | 'deny',
+  decisions: ClaudeDecisions = new Map(),
+) {
+  const gate = new PermissionGate('smart', { workspace });
+  const asked: string[] = [];
+  gate.onApproval(async (request) => {
+    asked.push(request.target);
+    return answer;
+  });
+  gate.beginTask(authorizeTask('Analyze the project.', null));
+  const output = (await workspaceGuard(
+    workspace,
+    'smart',
+    gate,
+    decisions,
+  )(
+    {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+      tool_use_id: 'toolu_1',
+      session_id: 'session',
+      transcript_path: '',
+      cwd: workspace,
+    } as never,
+    'toolu_1',
+    { signal: new AbortController().signal },
+  )) as { hookSpecificOutput?: { permissionDecision?: string } };
+  return { decision: output.hookSpecificOutput?.permissionDecision, asked, gate, decisions };
+}
+
+test('commands the runtime would auto-approve still go through Polaris’s policy', async () => {
+  for (const command of [
+    'find src -type f',
+    'git status && echo x && git diff',
+    'cat ../outside/secret.txt',
+  ]) {
+    const { decision, asked } = await hooked(command, 'deny');
+    assert.equal(decision, 'deny', command);
+    assert.deepEqual(asked, [command], `${command} was put to the user`);
+  }
+  const safe = await hooked('ls -la', 'deny');
+  assert.equal(safe.decision, 'allow');
+  assert.deepEqual(safe.asked, [], 'safe inspection is not a question');
+});
+
+test('the permission callback reuses the hook’s decision instead of asking again', async () => {
+  const { decision, asked, gate, decisions } = await hooked('npm test', 'allow');
+  assert.equal(decision, 'allow');
+  const bridge = permissionBridge(workspace, gate, decisions);
+  const result = await bridge('Bash', { command: 'npm test' }, {
+    signal: new AbortController().signal,
+    toolUseID: 'toolu_1',
+  } as never);
+  assert.equal(result.behavior, 'allow');
+  assert.deepEqual(asked, ['npm test'], 'asked once, not twice');
 });

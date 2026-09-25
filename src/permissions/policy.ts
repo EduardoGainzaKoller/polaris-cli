@@ -187,6 +187,7 @@ export const AUTONOMY_GUIDANCE = [
   'destructive Git commands. Do not ask in your reply for permission to read, search or edit',
   'files, and do not announce routine steps — do them. Prefer the file tools for reading,',
   'searching and editing over shell commands that do the same (cat, ls, grep, sed), which',
-  'need approval more often. If the user refuses an operation, do not repeat it: explain',
+  'need approval more often. Run one command per call: a compound line (&&, ;, |,',
+  'redirections) always needs approval. If the user refuses an operation, do not repeat it: explain',
   'what you wanted to do or suggest an alternative.',
 ].join(' ');

@@ -70,32 +70,63 @@ function isSkillTool(name: string): boolean {
   return (SKILL_TOOL_NAMES as readonly string[]).includes(name);
 }
 
-export function permissionBridge(cwd: string, gate: PermissionGate): CanUseTool {
-  return async (toolName, input, { signal }) => {
+/**
+ * Decisions the PreToolUse hook already made, by tool-use id, so the
+ * permission callback — when the runtime still calls it — never asks twice.
+ */
+export type ClaudeDecisions = Map<string, { allowed: boolean; reason: string }>;
+
+export function permissionBridge(
+  cwd: string,
+  gate: PermissionGate,
+  decisions: ClaudeDecisions = new Map(),
+): CanUseTool {
+  return async (toolName, input, { signal, toolUseID }) => {
     if (isSkillTool(toolName)) return { behavior: 'allow', updatedInput: input };
-    const capability = CAPABILITIES[toolName];
-    if (!capability) {
-      return { behavior: 'deny', message: `${toolName} is not available in Polaris.` };
+    const known = toolUseID ? decisions.get(toolUseID) : undefined;
+    if (known) {
+      decisions.delete(toolUseID);
+      return known.allowed
+        ? { behavior: 'allow', updatedInput: input }
+        : { behavior: 'deny', message: known.reason };
     }
-    // The runtime's own tool input, described as a Polaris operation: the
-    // policy decides by what the call does, not by which tool name it has.
-    const { replacesLines, ...card } = await describe(toolName, input, cwd);
-    const path = [input.file_path, input.path].find((value) => typeof value === 'string');
-    const verdict = await gate.authorize(
-      {
-        capability,
-        target: card.target,
-        ...(capability !== 'command' && typeof path === 'string' ? { paths: [path] } : {}),
-        ...(capability === 'command' ? { command: String(input.command ?? ''), cwd } : {}),
-        ...(replacesLines ? { replacesLines } : {}),
-      },
-      card,
-      signal,
-    );
+    const verdict = await authorizeCall(cwd, gate, toolName, input, signal);
     return verdict.allowed
       ? { behavior: 'allow', updatedInput: input }
       : { behavior: 'deny', message: verdict.reason };
   };
+}
+
+/**
+ * One Claude tool call through Polaris's policy. The runtime's own tool input
+ * is described as a Polaris operation, so the policy decides by what the call
+ * does, not by which tool name it has.
+ */
+async function authorizeCall(
+  cwd: string,
+  gate: PermissionGate,
+  toolName: string,
+  input: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<{ allowed: boolean; reason: string }> {
+  const capability = CAPABILITIES[toolName];
+  if (!capability) return { allowed: false, reason: `${toolName} is not available in Polaris.` };
+  const { replacesLines, ...card } = await describe(toolName, input, cwd);
+  const path = [input.file_path, input.path].find((value) => typeof value === 'string');
+  const verdict = await gate.authorize(
+    {
+      capability,
+      target: card.target,
+      ...(capability !== 'command' && typeof path === 'string' ? { paths: [path] } : {}),
+      ...(capability === 'command' ? { command: String(input.command ?? ''), cwd } : {}),
+      ...(replacesLines ? { replacesLines } : {}),
+    },
+    card,
+    signal,
+  );
+  return verdict.allowed
+    ? { allowed: true, reason: verdict.decision?.reason ?? 'Allowed by Polaris.' }
+    : { allowed: false, reason: verdict.reason };
 }
 
 /** Builds the approval card from the runtime's own tool input. */
@@ -184,9 +215,14 @@ async function safeRead(cwd: string, path: string): Promise<string | null> {
  * `permissionBridge`'s approval: the bridge decides whether to ask, this
  * decides what is reachable at all.
  */
-export function workspaceGuard(cwd: string, profile: PermissionProfile): HookCallback {
+export function workspaceGuard(
+  cwd: string,
+  profile: PermissionProfile,
+  gate?: PermissionGate,
+  decisions: ClaudeDecisions = new Map(),
+): HookCallback {
   const allowed = toolsFor(profile);
-  return async (input) => {
+  return async (input, toolUseID, options) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
 
     const deny = (reason: string) => ({
@@ -219,7 +255,22 @@ export function workspaceGuard(cwd: string, profile: PermissionProfile): HookCal
         return deny('Path is outside the workspace.');
       }
     }
-    return {};
+    if (!gate) return {};
+
+    // The runtime approves some commands on its own — `ls`, `find`, even
+    // `git status && … && git diff` — without ever calling canUseTool. This
+    // hook runs for every call, so Polaris's policy decides here, and the
+    // answer is handed to canUseTool in case the runtime asks it as well.
+    const verdict = await authorizeCall(cwd, gate, input.tool_name, toolInput, options?.signal);
+    if (toolUseID) decisions.set(toolUseID, verdict);
+    if (!verdict.allowed) return deny(verdict.reason);
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'allow' as const,
+        permissionDecisionReason: verdict.reason,
+      },
+    };
   };
 }
 

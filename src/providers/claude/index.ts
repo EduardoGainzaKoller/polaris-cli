@@ -32,6 +32,7 @@ import type {
 } from '../provider.ts';
 import { toPolarisError, turnFailure } from './errors.ts';
 import {
+  type ClaudeDecisions,
   ClaudeToolTranslator,
   claudeAccess,
   DENIED_TOOLS,
@@ -145,6 +146,8 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       let effort: EffortLevel | undefined =
         session.effort === undefined ? undefined : asEffort(session.effort);
       const translator = new ClaudeToolTranslator(session.cwd);
+      // What the PreToolUse hook decided, so canUseTool never asks again.
+      const decisions: ClaudeDecisions = new Map();
       const context = session.context;
 
       function start(): ClaudeRun {
@@ -169,9 +172,15 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
                   { mcpServers: { [SKILL_SERVER]: skillServer(context) } }
                 : {}),
               tools: toolsFor(session.permissions),
-              canUseTool: permissionBridge(session.cwd, session.gate),
+              canUseTool: permissionBridge(session.cwd, session.gate, decisions),
               hooks: {
-                PreToolUse: [{ hooks: [workspaceGuard(session.cwd, session.permissions)] }],
+                PreToolUse: [
+                  {
+                    hooks: [
+                      workspaceGuard(session.cwd, session.permissions, session.gate, decisions),
+                    ],
+                  },
+                ],
               },
               ...(session.model ? { model: session.model } : {}),
               ...(effort ? { effort } : {}),

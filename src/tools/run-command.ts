@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 import { debug } from '../core/logger.ts';
+import { executableName, parseCommand } from '../permissions/shell.ts';
 import {
   COMMAND_OUTPUT_HEAD_LINES,
   COMMAND_OUTPUT_TAIL_LINES,
@@ -153,6 +154,7 @@ function runProcess(
     // its own process group, which is what makes killing the *tree* possible.
     const child = spawn(input.command, {
       cwd,
+      env: environmentFor(input.command),
       shell: true,
       windowsHide: true,
       ...(process.platform === 'win32' ? {} : { detached: true }),
@@ -218,6 +220,23 @@ function runProcess(
       });
     });
   });
+}
+
+/**
+ * Git is often run without asking (safe inspection), so it gets an
+ * environment that cannot wait on a pager or a credential prompt, and that
+ * drops an inherited `GIT_EXTERNAL_DIFF` — a diff helper would run a program
+ * the user never approved. Every other command inherits the environment
+ * untouched: it was approved as it is.
+ *
+ * ponytail: a `diff.external` in the user's own Git config still applies;
+ * cover it with `--no-ext-diff` if that ever matters.
+ */
+export function environmentFor(command: string): NodeJS.ProcessEnv {
+  const parsed = parseCommand(command);
+  if (!parsed || executableName(parsed.argv[0] ?? '') !== 'git') return process.env;
+  const { GIT_EXTERNAL_DIFF: _external, ...rest } = process.env;
+  return { ...rest, GIT_PAGER: 'cat', PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' };
 }
 
 /**
