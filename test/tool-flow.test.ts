@@ -258,34 +258,34 @@ async function toolsNotice(profile: PermissionProfile): Promise<string> {
   return notice;
 }
 
-test('/tools shows every tool with what the profile does about it', async () => {
-  const ask = await toolsNotice('ask');
-  assert.match(ask, /Tools \(Polaris\)/);
-  assert.match(ask, /read_file\s+auto/);
-  assert.match(ask, /glob_files\s+auto/);
-  assert.match(ask, /grep_text\s+auto/);
-  assert.match(ask, /write_file\s+ask/);
-  assert.match(ask, /edit_file\s+ask/);
-  assert.match(ask, /run_command\s+ask/);
-  assert.match(ask, /Permissions: ask/);
+test('/tools describes the policy by what things do, not tool by tool', async () => {
+  const smart = await toolsNotice('smart');
+  assert.match(
+    smart,
+    /Tools \(Polaris\): read_file, glob_files, grep_text, write_file, edit_file, run_command/,
+  );
+  assert.match(smart, /Read \/ Glob \/ Grep\s+auto/);
+  assert.match(smart, /Write \/ Edit\s+auto when the request asks for changes · ask otherwise/);
+  assert.match(smart, /safe Git inspection\s+auto/);
+  assert.match(smart, /project code, installs, network\s+ask/);
+  assert.match(smart, /Outside the workspace\s+denied/);
+  assert.match(smart, /Permissions: smart/);
   // Polaris runs commands itself here, with no sandbox, and says so.
-  assert.match(ask, /not sandboxed/);
+  assert.match(smart, /not sandboxed/);
 });
 
-test('/tools shows denied capabilities under read-only', async () => {
+test('/tools under read-only: no edits, and no command beyond safe inspection', async () => {
   const notice = await toolsNotice('read-only');
-  assert.match(notice, /read_file\s+auto/);
   assert.doesNotMatch(notice, /write_file/);
-  assert.match(notice, /Write\s+denied/);
-  assert.match(notice, /Edit\s+denied/);
-  assert.match(notice, /Run Command\s+denied/);
+  assert.match(notice, /Write \/ Edit\s+denied/);
+  assert.match(notice, /safe Git inspection\s+auto/);
+  assert.match(notice, /anything else\s+denied/);
 });
 
-test('/tools shows edits as automatic under workspace-write, commands still asking', async () => {
+test('/tools shows edits as automatic under workspace-write, commands still classified', async () => {
   const notice = await toolsNotice('workspace-write');
-  assert.match(notice, /write_file\s+auto/);
-  assert.match(notice, /edit_file\s+auto/);
-  assert.match(notice, /run_command\s+ask/);
+  assert.match(notice, /Write \/ Edit\s+auto\n/);
+  assert.match(notice, /project code, installs, network\s+ask/);
 });
 
 test('/status reports the permission profile', async () => {

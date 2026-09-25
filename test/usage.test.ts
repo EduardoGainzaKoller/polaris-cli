@@ -211,7 +211,7 @@ test('a Claude result with no usage reports nothing', () => {
 async function status(provider = 'mock'): Promise<string> {
   const registry = new CommandRegistry();
   registry.register(...builtinCommands(registry));
-  const app = new PolarisApp({ cwd: '/work', config: { provider, permissions: 'ask' } });
+  const app = new PolarisApp({ cwd: '/work', config: { provider, permissions: 'smart' } });
   await app.start();
   await app.submit('hola');
   const context: CommandContext = {
@@ -230,7 +230,7 @@ async function status(provider = 'mock'): Promise<string> {
 test('/status shows the session and what it has consumed', async () => {
   const text = await status();
   assert.match(text, /provider\s+mock/);
-  assert.match(text, /perms\s+ask/);
+  assert.match(text, /perms\s+smart/);
   assert.match(text, /plan\s+offline/);
   assert.match(text, /Limits/);
   assert.match(text, /Tokens by model/);

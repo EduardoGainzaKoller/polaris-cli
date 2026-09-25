@@ -33,8 +33,8 @@ async function run(
   input: unknown,
   options: { answer?: 'allow' | 'deny'; signal?: AbortSignal; onOutput?: (t: string) => void } = {},
 ): Promise<ToolCallResult> {
-  const { gate } = autoGate('ask', options.answer ?? 'allow');
-  return createRegistry('ask', gate).execute('run_command', input, {
+  const { gate } = autoGate('smart', options.answer ?? 'allow');
+  return createRegistry('smart', gate).execute('run_command', input, {
     cwd: workspace,
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.onOutput ? { onOutput: options.onOutput } : {}),
@@ -179,14 +179,14 @@ test('a denied command never starts', async () => {
 });
 
 test('the approval shows the command in full and where it will run', async () => {
-  const { gate, asked } = autoGate('ask', 'allow');
+  const { gate, asked } = autoGate('smart', 'allow');
   const seen: Array<{ facts?: readonly string[] }> = [];
   gate.onApproval(async (request) => {
     seen.push(request);
     asked.push(request.target);
     return 'allow';
   });
-  await createRegistry('ask', gate).execute(
+  await createRegistry('smart', gate).execute(
     'run_command',
     { command: 'node -e "console.log(1)"' },
     { cwd: workspace },
@@ -214,8 +214,8 @@ test('run_command refuses input it cannot trust and clamps the timeout', async (
   assert.match(failed(await run({ command: '   ' })).error, /non-empty/);
   assert.match(failed(await run({ command: 'x', timeoutMs: 1.5 })).error, /integer/);
 
-  const { gate } = autoGate('ask', 'allow');
-  const tool = createRegistry('ask', gate).get('run_command');
+  const { gate } = autoGate('smart', 'allow');
+  const tool = createRegistry('smart', gate).get('run_command');
   const parsed = tool?.parse({ command: 'x', timeoutMs: 99_999_999 }) as { timeoutMs: number };
   assert.equal(parsed.timeoutMs, 600_000);
 });

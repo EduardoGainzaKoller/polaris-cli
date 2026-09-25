@@ -9,7 +9,7 @@ import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
 import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
 import type { PermissionProfile } from '../../permissions/policy.ts';
-import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
+import { AUTONOMY_GUIDANCE, PERMISSION_PROFILES } from '../../permissions/policy.ts';
 import { streamOutput, toolFinished, toolResultText, toolStarted } from '../../tools/events.ts';
 import { MAX_TOOL_ROUNDS } from '../../tools/limits.ts';
 import { createRegistry, polarisAccess } from '../../tools/registry.ts';
@@ -64,12 +64,9 @@ function systemPrompt(profile: PermissionProfile): string {
     'run_command. Everything stays inside the workspace root. Prefer edit_file over write_file',
     'for a change to part of a file, and always read a file before editing it, because oldText',
     'must match exactly.',
-    profile === 'ask'
-      ? 'Writes, edits and commands need the user to approve each one.'
-      : 'Commands need the user to approve each one; workspace edits do not.',
-    'If the user refuses an operation, do not repeat it: explain what you wanted to do or',
-    'suggest an alternative. A non-zero exit code from run_command is information, not a',
-    'failure of the tool — read the output and decide what to do next.',
+    AUTONOMY_GUIDANCE,
+    'A non-zero exit code from run_command is information, not a failure of the tool — read',
+    'the output and decide what to do next.',
     COMPLETION_GUIDANCE,
   ].join(' ');
 }

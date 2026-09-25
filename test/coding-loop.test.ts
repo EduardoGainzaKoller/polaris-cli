@@ -26,7 +26,7 @@ beforeEach(async () => {
   await writeFile(join(workspace, 'src', 'hello.ts'), "export const hello = () => 'hi';\n");
 });
 
-function polaris(permissions: PermissionProfile = 'ask'): PolarisApp {
+function polaris(permissions: PermissionProfile = 'smart'): PolarisApp {
   return new PolarisApp({ cwd: workspace, config: { provider: 'mock', permissions } });
 }
 
@@ -51,7 +51,7 @@ function tools(messages: readonly UiMessage[]): UiMessage[] {
 }
 
 test('read, edit, run: the first real coding loop, each mutation approved', async () => {
-  const app = polaris('ask');
+  const app = polaris('smart');
   await app.start();
   const answers = answerWith(app, () => 'allow');
 
@@ -76,7 +76,7 @@ test('read, edit, run: the first real coding loop, each mutation approved', asyn
 });
 
 test('a refusal stops the operation and leaves the session working', async () => {
-  const app = polaris('ask');
+  const app = polaris('smart');
   await app.start();
   const answers = answerWith(app, () => 'deny');
   const before = await readFile(join(workspace, 'src', 'hello.ts'), 'utf8');
@@ -110,10 +110,12 @@ test('read-only makes the mutation impossible, not merely discouraged', async ()
   await app.submit("@edit(src/hello.ts :: 'hi' :: 'wiped') @run(node -e \"console.log(1)\") va");
 
   assert.equal(asked, 0, 'nothing was even offered for approval');
-  for (const call of tools(app.state.messages)) {
-    assert.equal(call.state, 'error');
-    assert.match(call.tool?.detail ?? '', /Unknown tool/);
-  }
+  const [edit, run] = tools(app.state.messages);
+  // There is no edit tool to call at all…
+  assert.equal(edit?.state, 'error');
+  assert.match(edit?.tool?.detail ?? '', /Unknown tool/);
+  // …and a command that is not safe inspection is refused by the policy.
+  assert.match(run?.tool?.detail ?? '', /Read-only runs only safe inspection commands/);
   assert.equal(await readFile(join(workspace, 'src', 'hello.ts'), 'utf8'), before);
   stop();
   await app.close();
@@ -139,7 +141,7 @@ test('workspace-write edits without asking, but still asks for commands', async 
 });
 
 test('a write outside the workspace is refused under every profile', async () => {
-  for (const profile of ['ask', 'workspace-write'] as PermissionProfile[]) {
+  for (const profile of ['smart', 'workspace-write'] as PermissionProfile[]) {
     const app = polaris(profile);
     await app.start();
     const answers = answerWith(app, () => 'allow');
@@ -191,9 +193,9 @@ test('a failing command is a result the loop can act on', async () => {
 });
 
 test('the profile can be changed mid-session and takes effect immediately', async () => {
-  const app = polaris('ask');
+  const app = polaris('smart');
   await app.start();
-  assert.equal(app.state.permissions, 'ask');
+  assert.equal(app.state.permissions, 'smart');
 
   await app.setPermissions('read-only');
   assert.equal(app.state.permissions, 'read-only');
@@ -216,7 +218,7 @@ test('commands that would strand a pending approval are blocked while one is ope
 test('/permissions lists the profiles and switches between them', async () => {
   const registry = new CommandRegistry();
   registry.register(...builtinCommands(registry));
-  const app = polaris('ask');
+  const app = polaris('smart');
   await app.start();
 
   const context: CommandContext = {
@@ -229,9 +231,9 @@ test('/permissions lists the profiles and switches between them', async () => {
 
   await registry.get('permissions')?.run(context, []);
   const listing = app.state.messages.at(-1)?.text ?? '';
-  assert.match(listing, /Current: ask/);
-  assert.match(listing, /read-only\s+Inspect the repository only/);
-  assert.match(listing, /workspace-write\s+Allow workspace edits/);
+  assert.match(listing, /smart \[current\]\n\s+Does the routine work the current task needs/);
+  assert.match(listing, /read-only\n\s+Repository inspection only\./);
+  assert.match(listing, /workspace-write\n\s+Allows workspace modifications/);
 
   await registry.get('permissions')?.run(context, ['workspace-write']);
   assert.equal(app.state.permissions, 'workspace-write');

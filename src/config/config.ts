@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { debug } from '../core/logger.ts';
-import { DEFAULT_PROFILE, isProfile, type PermissionProfile } from '../permissions/policy.ts';
+import { DEFAULT_PROFILE, type PermissionProfile, toProfile } from '../permissions/policy.ts';
 
 export interface PolarisConfig {
   provider: string;
@@ -43,10 +43,10 @@ export async function loadConfig(): Promise<PolarisConfig> {
       ...stored,
       // An unknown profile in the file falls back to the default rather than
       // to whatever it happens to spell: a typo must never widen access.
+      // v0.6's `ask` became `smart`; an unknown name falls back to the default.
       permissions:
-        typeof stored.permissions === 'string' && isProfile(stored.permissions)
-          ? stored.permissions
-          : DEFAULT_PROFILE,
+        (typeof stored.permissions === 'string' ? toProfile(stored.permissions) : null) ??
+        DEFAULT_PROFILE,
     };
   } catch (error) {
     debug('config', 'using defaults:', (error as Error).message);

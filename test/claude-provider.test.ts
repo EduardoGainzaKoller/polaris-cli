@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { PolarisError } from '../src/core/errors.ts';
+import { PermissionGate } from '../src/permissions/gate.ts';
+import { authorizeTask } from '../src/permissions/task.ts';
 import {
   type ClaudeRun,
   claudeProvider,
@@ -149,14 +154,14 @@ test('a configured model is passed through to the runtime', async () => {
   await session.close();
 });
 
-test('under read-only only the three inspection tools reach the runtime', async () => {
+test('under read-only only inspection tools reach the runtime (Bash for safe Git inspection)', async () => {
   const { run, seen } = fakeClaude();
   const session = await createClaudeProvider(run).createSession(
     testSession('/work', { permissions: 'read-only' }),
   );
   await collect(session.send('hola'));
 
-  assert.deepEqual(seen.options?.tools, ['Read', 'Glob', 'Grep']);
+  assert.deepEqual(seen.options?.tools, ['Read', 'Glob', 'Grep', 'Bash']);
   for (const denied of ['NotebookEdit', 'WebFetch', 'WebSearch']) {
     assert.ok(seen.options?.disallowedTools?.includes(denied), `${denied} is denied`);
   }
@@ -172,7 +177,7 @@ test('under read-only only the three inspection tools reach the runtime', async 
 test('a mutating profile adds the runtime tools and the official permission callback', async () => {
   const { run, seen } = fakeClaude();
   const session = await createClaudeProvider(run).createSession(
-    testSession('/work', { permissions: 'ask' }),
+    testSession('/work', { permissions: 'smart' }),
   );
   await collect(session.send('hola'));
 
@@ -187,8 +192,8 @@ test('a mutating profile adds the runtime tools and the official permission call
 });
 
 test('the permission callback asks the gate and answers in the runtime vocabulary', async () => {
-  const allowed = autoGate('ask', 'allow');
-  const refused = autoGate('ask', 'deny');
+  const allowed = autoGate('smart', 'allow');
+  const refused = autoGate('smart', 'deny');
 
   const yes = permissionBridge('/work', allowed.gate);
   const no = permissionBridge('/work', refused.gate);
@@ -375,7 +380,7 @@ test('a runtime call to load a skill is not shown as a tool', async () => {
 });
 
 test('the skill tools are allowed without an approval, and nothing else gets that', async () => {
-  const { gate, asked } = autoGate('ask', 'deny');
+  const { gate, asked } = autoGate('smart', 'deny');
   const bridge = permissionBridge('/tmp', gate);
   const signal = new AbortController().signal;
   const allowed = await bridge('mcp__polaris__load_skill', { name: 'x' }, { signal } as never);
@@ -383,4 +388,42 @@ test('the skill tools are allowed without an approval, and nothing else gets tha
   const other = await bridge('mcp__someone__load_skill', {}, { signal } as never);
   assert.equal(other.behavior, 'deny');
   assert.deepEqual(asked, []);
+});
+
+// ---------------------------------------------------------- smart permissions
+
+test('smart: Claude’s callback lets authorised edits through silently and asks before npm test', async () => {
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), 'polaris-claude-smart-')));
+  await mkdir(join(workspace, 'src'));
+  await writeFile(join(workspace, 'src', 'a.ts'), 'a\n');
+  const gate = new PermissionGate('smart', { workspace });
+  const asked: string[] = [];
+  gate.onApproval(async (request) => {
+    asked.push(`${request.target} · ${request.reason}`);
+    return 'allow';
+  });
+  gate.beginTask(authorizeTask('Implementa createUser y añade los tests.', null));
+  const bridge = permissionBridge(workspace, gate);
+  const call = (tool: string, input: Record<string, unknown>) =>
+    bridge(tool, input, { signal: new AbortController().signal } as never);
+
+  const file = join(workspace, 'src', 'a.ts');
+  assert.equal(
+    (await call('Edit', { file_path: file, old_string: 'a', new_string: 'b' })).behavior,
+    'allow',
+  );
+  assert.equal(
+    (await call('Write', { file_path: join(workspace, 'src', 'a.test.ts'), content: 'x' }))
+      .behavior,
+    'allow',
+  );
+  assert.equal((await call('Bash', { command: 'git diff' })).behavior, 'allow');
+  assert.deepEqual(asked, [], 'routine work, no card');
+
+  assert.equal((await call('Bash', { command: 'npm test' })).behavior, 'allow');
+  assert.deepEqual(asked, ['npm test · Executes project code.']);
+
+  const outside = await call('Write', { file_path: join(tmpdir(), 'x.txt'), content: 'x' });
+  assert.equal(outside.behavior, 'deny');
+  assert.equal(asked.length, 1, 'the boundary is never a question');
 });

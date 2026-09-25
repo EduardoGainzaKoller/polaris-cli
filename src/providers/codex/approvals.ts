@@ -1,7 +1,9 @@
-import type { PermissionProfile } from '../../permissions/policy.ts';
+import { isAbsolute, resolve } from 'node:path';
+import type { Operation, PermissionProfile } from '../../permissions/policy.ts';
+import { parseCommand } from '../../permissions/shell.ts';
 import { truncateDiff } from '../../tools/diff.ts';
 import type { JsonObject } from './app-server.ts';
-import { effectiveAction } from './items.ts';
+import { type CommandAction, classify } from './items.ts';
 
 /**
  * Codex owns its agent loop, its sandbox and its approval protocol. This file
@@ -41,7 +43,8 @@ const ACCEPT = 'accept';
 const DECLINE = 'decline';
 
 export interface ApprovalCard {
-  readonly capability: 'write' | 'edit' | 'command';
+  /** What Codex wants to do, in Polaris's terms; the policy decides from this. */
+  readonly operation: Operation;
   readonly title: string;
   readonly target: string;
   readonly reason?: string;
@@ -97,8 +100,24 @@ export function toCard(
 }
 
 function commandCard(command: string, params: JsonObject, cwd: string): ApprovalCard {
+  const where = typeof params.cwd === 'string' ? params.cwd : cwd;
+  const network = params.networkApprovalContext as { host?: string } | null | undefined;
+  // Typing into a running terminal is running code, whatever the text says.
+  const stdin = params.kind === 'writeStdin';
+  const reads = network || stdin ? null : readPaths(command, params, where);
   return {
-    capability: 'command',
+    // Codex asks even for the commands it uses to read (on Windows, every
+    // Get-Content). When its own parse says a command only reads, lists or
+    // searches, it is a read — and reads inside the workspace are routine.
+    operation: reads
+      ? { capability: 'read', target: command, paths: reads }
+      : {
+          capability: 'command',
+          target: command,
+          command: stdin ? `(input to a running process) ${command}` : command,
+          cwd: where,
+          ...(network ? { network: network.host ?? 'an external host' } : {}),
+        },
     title: 'Run command',
     target: command,
     ...(typeof params.reason === 'string' ? { reason: params.reason } : {}),
@@ -111,16 +130,51 @@ function commandCard(command: string, params: JsonObject, cwd: string): Approval
 
 /**
  * On Windows every command Codex runs is wrapped in a `powershell.exe
- * -Command '...'` invocation, and approving `"C:\\WINDOWS\\System32\\...` tells
- * nobody anything. Codex reports the command it actually parsed alongside the
- * wrapper, so that is what the card shows — the real command, in full, never
- * shortened. The wrapper is only how it is launched.
+ * -Command '...'` invocation (elsewhere, `bash -lc '...'`), and approving
+ * `"C:\\WINDOWS\\System32\\...` tells nobody anything. The wrapper is peeled
+ * off the actual text, so the card — and the policy — see the whole real
+ * command. Codex's parsed actions never stand in for the text: a first action
+ * standing in for a longer line would hide whatever came after it.
  */
 function unwrap(params: JsonObject): string {
   const raw = typeof params.command === 'string' ? params.command : '';
-  const { action } = effectiveAction(params as never);
-  const inner = action?.command;
-  return inner && inner.length > 0 ? inner : raw;
+  return peel(raw) ?? raw;
+}
+
+const WRAPPER =
+  /^\s*(?:"[^"]*[\\/])?(?:powershell|pwsh)(?:\.exe)?"?\s+(?:-NoProfile\s+|-NonInteractive\s+)*-Command\s+'((?:[^']|'')*)'\s*$/i;
+const POSIX_WRAPPER = /^\s*(?:\S*\/)?(?:bash|sh|zsh)\s+-l?c\s+'([^']*)'\s*$/;
+
+/** The command inside a known launcher wrapper, or null when there is none. */
+export function peel(raw: string): string | null {
+  const windows = WRAPPER.exec(raw);
+  if (windows) return (windows[1] ?? '').replaceAll("''", "'");
+  const posix = POSIX_WRAPPER.exec(raw);
+  return posix ? (posix[1] ?? '') : null;
+}
+
+const READ_ACTIONS = new Set(['read', 'listFiles', 'search']);
+
+/**
+ * The paths a command reads, when Codex parsed every part of it as a read,
+ * listing or search — or null when it does anything else. The line itself
+ * must not compose commands either: a read followed by `; rm …` is not a read.
+ */
+function readPaths(command: string, params: JsonObject, where: string): string[] | null {
+  const actions = (
+    Array.isArray(params.commandActions) ? params.commandActions : []
+  ) as CommandAction[];
+  if (actions.length === 0) return null;
+  const parsed = parseCommand(command);
+  if (!parsed || parsed.composite) return null;
+  const paths: string[] = [];
+  for (const raw of actions) {
+    const action = raw.type === 'unknown' && raw.command ? (classify(raw.command) ?? raw) : raw;
+    if (!READ_ACTIONS.has(action.type ?? '')) return null;
+    const path = action.path ?? '.';
+    paths.push(isAbsolute(path) ? path : resolve(where, path));
+  }
+  return paths;
 }
 
 export interface FileChange {
@@ -136,7 +190,12 @@ function fileCard(
 ): ApprovalCard {
   const paths = changes.map((change) => relative(cwd, change.path));
   return {
-    capability: 'edit',
+    operation: {
+      capability: 'edit',
+      target: paths.join(', '),
+      paths: changes.map((change) => change.path),
+      ...(grantRoot ? { grantRoot } : {}),
+    },
     title: changes.length > 1 ? `Edit ${changes.length} files` : 'Edit',
     target: paths.join(', ') || '(no files reported)',
     ...(reason ? { reason } : {}),

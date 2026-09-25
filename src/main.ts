@@ -6,7 +6,7 @@ import { loadConfig, polarisHome } from './config/config.ts';
 import { PolarisApp } from './core/app.ts';
 import { toUserMessage } from './core/errors.ts';
 import { debug, isDebug, setDebug, setLogFile } from './core/logger.ts';
-import { isProfile, PERMISSION_PROFILES } from './permissions/policy.ts';
+import { PERMISSION_PROFILES, toProfile } from './permissions/policy.ts';
 import { anthropicApiProvider } from './providers/anthropic-api/index.ts';
 import { claudeProvider } from './providers/claude/index.ts';
 import { codexProvider } from './providers/codex/index.ts';
@@ -23,7 +23,7 @@ Options:
   --provider <id>  mock (default), anthropic-api, claude or codex
   --model <id>     Override the configured model
   --permissions <profile>
-                   read-only, ask (default) or workspace-write, for this run only
+                   read-only, smart (default) or workspace-write, for this run only
   --debug          Print internal logs to stderr
   -v, --version    Print the version
   -h, --help       Show this message
@@ -65,13 +65,14 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   // A flag is an override for this run and is never written back: a profile
   // the user passed once must not silently become their stored default.
   if (values.permissions) {
-    if (!isProfile(values.permissions)) {
+    const profile = toProfile(values.permissions);
+    if (!profile) {
       ui.error(
         `Unknown permission profile "${values.permissions}". Use one of: ${PERMISSION_PROFILES.join(', ')}.`,
       );
       return 1;
     }
-    config.permissions = values.permissions;
+    config.permissions = profile;
   }
   debug('main', 'cwd', cwd, 'config', config);
 

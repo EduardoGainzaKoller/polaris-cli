@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { PolarisError } from '../src/core/errors.ts';
+import { PermissionGate } from '../src/permissions/gate.ts';
+import { authorizeTask } from '../src/permissions/task.ts';
 import type { CodexConnection, JsonObject } from '../src/providers/codex/app-server.ts';
 import { codexProvider, createCodexProvider } from '../src/providers/codex/index.ts';
 import type { ModelEvent } from '../src/providers/provider.ts';
@@ -298,7 +303,7 @@ test('a runtime that dies mid-turn ends the turn with a clean message', async ()
 test('the approval policy is one that actually asks about the workspace', async () => {
   // Found live: with `on-request`, Codex edits files and runs commands inside
   // its sandbox without ever asking, so an "ask" profile asked nothing at all.
-  for (const permissions of ['ask', 'workspace-write'] as const) {
+  for (const permissions of ['smart', 'workspace-write'] as const) {
     const codex = fakeCodex();
     const session = await createCodexProvider(codex.connect).createSession(
       testSession('/work', { permissions }),
@@ -314,10 +319,10 @@ test('a Windows shell wrapper is unwrapped before it is shown for approval', asy
   // Found live: on Windows every command is wrapped in powershell.exe, and
   // approving `"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
   // -Command '...'` tells nobody what they are agreeing to.
-  const { gate, asked } = autoGate('ask', 'allow');
+  const { gate, asked } = autoGate('smart', 'allow');
   const codex = fakeCodex();
   const session = await createCodexProvider(codex.connect).createSession(
-    testSession('/work', { permissions: 'ask', gate }),
+    testSession('/work', { permissions: 'smart', gate }),
   );
 
   await codex.ask('item/commandExecution/requestApproval', {
@@ -342,10 +347,10 @@ test('read-only keeps both the sandbox and the approval policy closed', async ()
 });
 
 test('a server approval request becomes a Polaris approval and comes back as a decision', async () => {
-  const allowed = autoGate('ask', 'allow');
+  const allowed = autoGate('smart', 'allow');
   const codex = fakeCodex();
   const session = await createCodexProvider(codex.connect).createSession(
-    testSession('/work', { permissions: 'ask', gate: allowed.gate }),
+    testSession('/work', { permissions: 'smart', gate: allowed.gate }),
   );
 
   assert.deepEqual(
@@ -376,10 +381,10 @@ test('a server approval request becomes a Polaris approval and comes back as a d
 });
 
 test('a refused approval declines in Codex vocabulary, legacy shape included', async () => {
-  const refused = autoGate('ask', 'deny');
+  const refused = autoGate('smart', 'deny');
   const codex = fakeCodex();
   const session = await createCodexProvider(codex.connect).createSession(
-    testSession('/tmp', { permissions: 'ask', gate: refused.gate }),
+    testSession('/tmp', { permissions: 'smart', gate: refused.gate }),
   );
 
   assert.deepEqual(
@@ -589,5 +594,76 @@ test('a dynamic tool call for a skill is not rendered as a tool', async () => {
     events.some((event) => event.type === 'tool-start'),
     false,
   );
+  await session.close();
+});
+
+// ---------------------------------------------------------- smart permissions
+
+test('smart: routine Codex requests are answered by the policy, boundaries reach the user', async () => {
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), 'polaris-codex-smart-')));
+  const gate = new PermissionGate('smart', { workspace });
+  const asked: string[] = [];
+  gate.onApproval(async (request) => {
+    asked.push(`${request.target} · ${request.reason}`);
+    return 'allow';
+  });
+  gate.beginTask(authorizeTask('Implement the login and add tests.', null));
+  const codex = fakeCodex();
+  const session = await createCodexProvider(codex.connect).createSession(
+    testSession(workspace, { permissions: 'smart', gate }),
+  );
+  const approve = (params: JsonObject) =>
+    codex.ask('item/commandExecution/requestApproval', params);
+
+  // Safe Git inspection, and a read Codex itself parsed as one: no card.
+  assert.deepEqual(await approve({ command: 'git status', cwd: workspace }), {
+    decision: 'accept',
+  });
+  assert.deepEqual(
+    await approve({
+      command: 'Get-Content -LiteralPath src/a.ts',
+      commandActions: [
+        { type: 'read', command: 'Get-Content src/a.ts', name: 'a.ts', path: 'src/a.ts' },
+      ],
+      cwd: workspace,
+    }),
+    { decision: 'accept' },
+  );
+  // A patch inside the workspace, for a task that asked for changes: no card.
+  codex.emit('item/started', {
+    item: {
+      id: 'fc1',
+      type: 'fileChange',
+      changes: [{ path: join(workspace, 'src', 'a.ts'), diff: '+x' }],
+    },
+  });
+  assert.deepEqual(await codex.ask('item/fileChange/requestApproval', { itemId: 'fc1' }), {
+    decision: 'accept',
+  });
+  assert.deepEqual(asked, []);
+
+  // Crossing a boundary asks, and says which one.
+  await approve({ command: 'npm install zod', cwd: workspace });
+  await approve({
+    command: 'npm test',
+    cwd: workspace,
+    networkApprovalContext: { host: 'registry.npmjs.org', protocol: 'https' },
+  });
+  assert.deepEqual(asked, [
+    'npm install zod · May modify dependencies, run install scripts and access the network.',
+    'npm test · Requests network access to registry.npmjs.org.',
+  ]);
+  // A read chained to something else is not a read.
+  await approve({
+    command: 'Get-Content a.txt; Remove-Item b.txt',
+    commandActions: [{ type: 'read', command: 'Get-Content a.txt', name: 'a.txt', path: 'a.txt' }],
+    cwd: workspace,
+  });
+  assert.equal(asked.length, 3);
+  // Outside the workspace: declined, and nobody is asked.
+  assert.deepEqual(await approve({ command: 'git status', cwd: tmpdir() }), {
+    decision: 'decline',
+  });
+  assert.equal(asked.length, 3);
   await session.close();
 });

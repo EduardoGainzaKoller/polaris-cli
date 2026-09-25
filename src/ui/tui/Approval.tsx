@@ -65,10 +65,16 @@ export function Approval({
         </Text>
       ))}
 
+      {/* Why a person is being asked at all: the boundary this crosses. */}
       {request.reason ? (
-        <Text color={palette.muted} wrap="truncate-end">
-          {request.reason}
-        </Text>
+        <Box>
+          <Text color={request.high ? palette.error : palette.warning}>
+            {request.high ? 'High risk: ' : 'Reason: '}
+          </Text>
+          <Text color={palette.text} wrap="truncate-end">
+            {request.reason}
+          </Text>
+        </Box>
       ) : null}
       {(request.facts ?? []).map((fact) => (
         <Text key={fact} color={palette.muted} wrap="truncate-end">

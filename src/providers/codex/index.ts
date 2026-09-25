@@ -7,7 +7,7 @@ import {
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
 import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
-import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
+import { AUTONOMY_GUIDANCE, PERMISSION_PROFILES } from '../../permissions/policy.ts';
 import { VERSION } from '../../version.ts';
 import type {
   ModelEvent,
@@ -71,8 +71,8 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
           debug('codex', 'declining unsupported request', method);
           return toDecision(method, false);
         }
-        const { capability, ...request } = card;
-        const verdict = await options.gate.authorize(capability, request);
+        const { operation, ...request } = card;
+        const verdict = await options.gate.authorize(operation, request);
         return toDecision(method, verdict.allowed);
       });
       connection.onClose((error) => turns.abortAll(error));
@@ -129,7 +129,9 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
         // the project's context, as developer instructions.
         const startThread = (canLoad: boolean) => {
           const developerInstructions = [
-            options.permissions === 'read-only' ? '' : COMPLETION_GUIDANCE,
+            options.permissions === 'read-only'
+              ? ''
+              : `${AUTONOMY_GUIDANCE} ${COMPLETION_GUIDANCE}`,
             context?.instructions({ canLoad }) ?? '',
           ]
             .filter(Boolean)

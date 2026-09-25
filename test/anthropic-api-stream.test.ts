@@ -197,14 +197,14 @@ test('the profile decides which tools the model is even offered', async () => {
   // tool that does not exist in the request at all.
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ['read_file', 'glob_files', 'grep_text'],
+    ['read_file', 'glob_files', 'grep_text', 'run_command'],
   );
   assert.ok(tools.every((tool) => typeof tool.input_schema === 'object'));
   await readOnly.close();
 
   reset();
   const ask = await anthropicApiProvider.createSession(
-    testSession(workspace, { permissions: 'ask' }),
+    testSession(workspace, { permissions: 'smart' }),
   );
   await collect(ask.send('hola'));
   const offered = requests[0]?.tools as Array<{ name: string }>;
@@ -227,9 +227,9 @@ test('a mutating tool is authorised before it runs, and its result goes back', a
     ],
   ];
   reply = ['Done.'];
-  const approved = autoGate('ask', 'allow');
+  const approved = autoGate('smart', 'allow');
   const session = await anthropicApiProvider.createSession(
-    testSession(workspace, { permissions: 'ask', gate: approved.gate }),
+    testSession(workspace, { permissions: 'smart', gate: approved.gate }),
   );
 
   const events = await collect(session.send('crea el archivo'));
@@ -259,9 +259,9 @@ test('a refused tool writes nothing and tells the model a person said no', async
     ],
   ];
   reply = ['Understood.'];
-  const refused = autoGate('ask', 'deny');
+  const refused = autoGate('smart', 'deny');
   const session = await anthropicApiProvider.createSession(
-    testSession(workspace, { permissions: 'ask', gate: refused.gate }),
+    testSession(workspace, { permissions: 'smart', gate: refused.gate }),
   );
 
   const events = await collect(session.send('crea el archivo'));

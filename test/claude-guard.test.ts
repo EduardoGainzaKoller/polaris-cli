@@ -60,17 +60,21 @@ test('paths outside the workspace are denied, symlinks and junctions included', 
   assert.equal(await decide('Glob', { pattern: join(outside, '*') }), 'deny');
 });
 
-test('under read-only, anything that is not Read, Glob or Grep is denied', async () => {
-  for (const tool of ['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch', 'Agent', 'mcp__x__y']) {
+test('under read-only, no file change exists; Bash reaches the policy, which allows only inspection', async () => {
+  for (const tool of ['Write', 'Edit', 'NotebookEdit', 'WebFetch', 'Agent', 'mcp__x__y']) {
     assert.equal(await decide(tool, {}), 'deny', `${tool} must be denied`);
   }
+  // Safe Git inspection is reading; the permission callback denies the rest.
+  assert.equal(await decide('Bash', { command: 'git status' }), 'pass');
 });
 
 test('the profile decides which mutating tools reach the runtime at all', async () => {
   // Under ask the tools exist (the approval, not the hook, is what gates them);
   // under read-only the hook removes them outright.
   for (const tool of ['Write', 'Edit', 'Bash']) {
-    assert.equal(await decide(tool, {}, 'ask'), 'pass', `${tool} must exist under ask`);
+    assert.equal(await decide(tool, {}, 'smart'), 'pass', `${tool} must exist under smart`);
+  }
+  for (const tool of ['Write', 'Edit']) {
     assert.equal(await decide(tool, {}, 'read-only'), 'deny', `${tool} must not exist read-only`);
   }
   // Out of scope for v0.6 whatever the profile says.

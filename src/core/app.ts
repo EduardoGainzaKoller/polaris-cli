@@ -3,7 +3,8 @@ import { type PolarisConfig, polarisHome } from '../config/config.ts';
 import { type ContextEvent, ContextManager } from '../context/manager.ts';
 import type { ApprovalDecision, ApprovalRequest } from '../permissions/gate.ts';
 import { PermissionGate } from '../permissions/gate.ts';
-import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
+import { DEFAULT_PROFILE, type PermissionProfile, toProfile } from '../permissions/policy.ts';
+import { authorizeTask, type TaskAuthorization, task } from '../permissions/task.ts';
 import type { ModelEvent, RuntimeActivity, ToolAccess } from '../providers/provider.ts';
 import {
   ChangeTracker,
@@ -181,13 +182,11 @@ export class PolarisApp {
     this.#context.onEvent((event) => this.#onContextEvent(event));
     // A config that names no profile gets the default, never a wider one: the
     // safe fallback is the point of having a default at all.
-    this.#config = {
-      ...options.config,
-      permissions: options.config.permissions ?? DEFAULT_PROFILE,
-    };
+    const profile = toProfile(options.config.permissions ?? '') ?? DEFAULT_PROFILE;
+    this.#config = { ...options.config, permissions: profile };
     // The gate holds the live profile, so there is exactly one answer to
     // "what may Polaris do right now" and the UI reads the same one.
-    this.#gate = new PermissionGate(options.config.permissions ?? DEFAULT_PROFILE);
+    this.#gate = new PermissionGate(profile, { workspace: options.cwd });
     // Without a UI that can render an approval there is nobody to consent, and
     // the gate denies rather than waiting forever for an answer.
     if (options.approvals === false) {
@@ -433,8 +432,21 @@ export class PolarisApp {
     await this.#run(text, false);
   }
 
-  async #run(text: string, report: boolean, parent?: string): Promise<void> {
+  /** What the current request authorises; for /status in debug mode and for tests. */
+  get task(): TaskAuthorization {
+    return this.#gate.task;
+  }
+
+  async #run(
+    text: string,
+    report: boolean,
+    parent?: string,
+    authorization?: TaskAuthorization,
+  ): Promise<void> {
     if (this.#turn) return;
+    // The user's words, and nothing the model says, decide what this task
+    // may do without asking.
+    this.#gate.beginTask(authorization ?? authorizeTask(text, this.#gate.task));
     this.#append('user', text, 'complete');
 
     const controller = new AbortController();
@@ -601,7 +613,12 @@ export class PolarisApp {
       state: 'running',
     });
     try {
-      await this.#run(verifyPrompt(this.#tracker?.changes() ?? []), true, verification);
+      await this.#run(
+        verifyPrompt(this.#tracker?.changes() ?? []),
+        true,
+        verification,
+        task('verification', false),
+      );
     } finally {
       this.#activity.finish(verification, 'completed');
     }

@@ -233,7 +233,7 @@ test('/config shows the file and values, /config save writes them', async () => 
     assert.match(h.lastNotice(), /Saved provider, model, effort and permissions/);
 
     const written = JSON.parse(await readFile(join(home, 'config.json'), 'utf8')) as unknown;
-    const saved = { provider: 'mock', permissions: 'ask', model: 'echo', effort: 'medium' };
+    const saved = { provider: 'mock', permissions: 'smart', model: 'echo', effort: 'medium' };
     assert.deepEqual(written, saved);
     assert.deepEqual(await loadConfig(), saved);
     await h.app.close();
@@ -249,7 +249,7 @@ test('a malformed config file falls back to defaults instead of failing', async 
   process.env.POLARIS_HOME = home;
   try {
     await saveConfig({ provider: 'codex' });
-    assert.deepEqual(await loadConfig(), { provider: 'codex', permissions: 'ask' });
+    assert.deepEqual(await loadConfig(), { provider: 'codex', permissions: 'smart' });
 
     // A profile nobody recognises must fall back to the default, never widen.
     await writeFile(
@@ -257,7 +257,7 @@ test('a malformed config file falls back to defaults instead of failing', async 
       JSON.stringify({ provider: 'codex', permissions: 'full-access' }),
       'utf8',
     );
-    assert.deepEqual(await loadConfig(), { provider: 'codex', permissions: 'ask' });
+    assert.deepEqual(await loadConfig(), { provider: 'codex', permissions: 'smart' });
   } finally {
     if (previous === undefined) delete process.env.POLARIS_HOME;
     else process.env.POLARIS_HOME = previous;

@@ -77,7 +77,21 @@ export function permissionBridge(cwd: string, gate: PermissionGate): CanUseTool 
     if (!capability) {
       return { behavior: 'deny', message: `${toolName} is not available in Polaris.` };
     }
-    const verdict = await gate.authorize(capability, await describe(toolName, input, cwd), signal);
+    // The runtime's own tool input, described as a Polaris operation: the
+    // policy decides by what the call does, not by which tool name it has.
+    const { replacesLines, ...card } = await describe(toolName, input, cwd);
+    const path = [input.file_path, input.path].find((value) => typeof value === 'string');
+    const verdict = await gate.authorize(
+      {
+        capability,
+        target: card.target,
+        ...(capability !== 'command' && typeof path === 'string' ? { paths: [path] } : {}),
+        ...(capability === 'command' ? { command: String(input.command ?? ''), cwd } : {}),
+        ...(replacesLines ? { replacesLines } : {}),
+      },
+      card,
+      signal,
+    );
     return verdict.allowed
       ? { behavior: 'allow', updatedInput: input }
       : { behavior: 'deny', message: verdict.reason };
@@ -89,7 +103,13 @@ async function describe(
   toolName: string,
   input: Record<string, unknown>,
   cwd: string,
-): Promise<{ title: string; target: string; facts?: string[]; diff?: string }> {
+): Promise<{
+  title: string;
+  target: string;
+  facts?: string[];
+  diff?: string;
+  replacesLines?: number;
+}> {
   const path = typeof input.file_path === 'string' ? input.file_path : '';
   const shown = path ? relativeTo(cwd, path) : '';
 
@@ -109,6 +129,7 @@ async function describe(
       title: 'Write',
       target: shown,
       facts: [before === null ? `New file · ${lines} lines` : `Replaces ${shown}`],
+      ...(before === null ? {} : { replacesLines: before.split('\n').length }),
       diff: truncateDiff(
         before === null
           ? content

@@ -363,7 +363,11 @@ test('model activity follows the runtime: waiting, a sign of life, tools, waitin
 
 test('an approval is its own activity under the turn, waiting on a person', async () => {
   const cwd = await workspace({ 'a.txt': 'a\n' });
-  const app = new PolarisApp({ cwd, home: cwd, config: { provider: 'mock', permissions: 'ask' } });
+  const app = new PolarisApp({
+    cwd,
+    home: cwd,
+    config: { provider: 'mock', permissions: 'smart' },
+  });
   let during: readonly Activity[] = [];
   app.subscribe((state) => {
     if (state.approval && during.length === 0) {

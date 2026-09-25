@@ -19,7 +19,11 @@ import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
 import type { ModelUsage, UsageReport } from '../../core/usage.ts';
 import { COMPLETION_GUIDANCE } from '../../core/verification.ts';
-import { PERMISSION_PROFILES, type PermissionProfile } from '../../permissions/policy.ts';
+import {
+  AUTONOMY_GUIDANCE,
+  PERMISSION_PROFILES,
+  type PermissionProfile,
+} from '../../permissions/policy.ts';
 import type {
   ModelEvent,
   ModelProvider,
@@ -87,11 +91,7 @@ function systemPrompt(profile: PermissionProfile): string {
     ...shared,
     'You can change files with Write and Edit and run commands with Bash, always inside',
     'the workspace root.',
-    profile === 'ask'
-      ? 'The user approves every write, edit and command individually.'
-      : 'The user approves every command individually; workspace edits apply directly.',
-    'If the user refuses an operation, do not repeat it: explain what you wanted to do or',
-    'suggest an alternative.',
+    AUTONOMY_GUIDANCE,
     COMPLETION_GUIDANCE,
   ].join(' ');
 }

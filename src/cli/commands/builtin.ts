@@ -1,17 +1,17 @@
 import { configPath, saveConfig } from '../../config/config.ts';
 import { type Activity, ago, clock } from '../../core/activity.ts';
 import type { AppState } from '../../core/app.ts';
+import { isDebug } from '../../core/logger.ts';
 import { usageLines } from '../../core/usage.ts';
 import { RESULT_LABEL } from '../../core/verification.ts';
 import {
-  decide,
   isProfile,
   PERMISSION_PROFILES,
   PROFILE_SUMMARY,
+  toProfile,
 } from '../../permissions/policy.ts';
 import { listProviders } from '../../providers/provider.ts';
 import { MAX_SESSION_DIFF_LINES } from '../../tools/limits.ts';
-import { capabilityOf } from '../../tools/registry.ts';
 import { statusOf } from '../../ui/activity.ts';
 import { shortenPath } from '../../ui/output.ts';
 import type { CommandRegistry } from './registry.ts';
@@ -45,6 +45,12 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
           `  model     ${state.model}`,
           `  effort    ${state.effort ?? 'default'}`,
           `  perms     ${state.permissions}`,
+          // What the current request authorises: a debugging aid, not news.
+          ...(isDebug()
+            ? [
+                `  task      ${app.task.intent}${app.task.modifyWorkspace ? ' · edits allowed' : ' · no edits'}`,
+              ]
+            : []),
           `  tools     ${state.access?.runtime ?? 'none'}`,
           ...(usage?.plan ? [`  plan      ${usage.plan}`] : []),
           `  turns     ${state.turns}`,
@@ -75,24 +81,43 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
           app.notice('No provider session is active.');
           return;
         }
-        // Every tool the runtime offers, with what the profile does about it:
-        // auto, ask, or not offered at all.
-        const rows = access.tools.map((tool) => {
-          const capability = capabilityOf(tool) ?? guessCapability(tool);
-          const verdict = capability ? decide(state.permissions, capability) : 'allow';
-          return [tool, verdict === 'allow' ? 'auto' : verdict] as const;
-        });
-        const width = Math.max(...rows.map(([tool]) => tool.length), 12);
-
+        // Semantic policy, not a per-tool table: what happens depends on
+        // what the task asked for and what a command would cross.
+        const profile = state.permissions;
+        const edits =
+          profile === 'read-only'
+            ? ['Write / Edit', 'denied']
+            : profile === 'workspace-write'
+              ? ['Write / Edit', 'auto']
+              : ['Write / Edit', 'auto when the request asks for changes · ask otherwise'];
+        const commands =
+          profile === 'read-only'
+            ? [
+                ['  safe Git inspection', 'auto'],
+                ['  anything else', 'denied'],
+              ]
+            : [
+                ['  safe Git inspection', 'auto'],
+                ['  project code, installs, network', 'ask'],
+                ['  unknown or compound commands', 'ask'],
+                ['  destructive Git', 'ask (high risk)'],
+              ];
+        const rows: Array<[string, string]> = [
+          ['Read / Glob / Grep', 'auto'],
+          [edits[0] as string, edits[1] as string],
+          ['Commands', ''],
+          ...(commands as Array<[string, string]>),
+          ['Project context, skills', 'auto'],
+          ['Outside the workspace', 'denied'],
+        ];
+        const width = Math.max(...rows.map(([label]) => label.length));
         app.notice(
           [
-            `  Tools (${access.runtime})`,
-            ...rows.map(([tool, verdict]) => `  ${tool.padEnd(width)}  ${verdict}`),
-            ...deniedCapabilities(state.permissions).map(
-              (name) => `  ${name.padEnd(width)}  denied`,
-            ),
+            `  Tools (${access.runtime}): ${access.tools.join(', ')}`,
             '',
-            `  Permissions: ${state.permissions}`,
+            ...rows.map(([label, verdict]) => `  ${label.padEnd(width)}  ${verdict}`.trimEnd()),
+            '',
+            `  Permissions: ${profile}`,
             access.sandboxed
               ? '  Commands run inside the runtime’s own OS sandbox.'
               : '  Commands are not sandboxed: approval, workspace cwd and a timeout bound them.',
@@ -107,29 +132,32 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       run: async (context, args) => {
         const { app } = context;
         if (!args[0]) {
-          const width = Math.max(...PERMISSION_PROFILES.map((name) => name.length));
           app.notice(
             [
-              `  Current: ${app.state.permissions}`,
+              '  Permissions',
               '',
-              ...PERMISSION_PROFILES.map(
-                (name) => `  ${name.padEnd(width)}  ${PROFILE_SUMMARY[name]}`,
-              ),
+              ...PERMISSION_PROFILES.flatMap((name) => [
+                `  ${name}${name === app.state.permissions ? ' [current]' : ''}`,
+                `    ${PROFILE_SUMMARY[name]}`,
+              ]),
               '',
-              '  /permissions <profile> switches; /config save stores it.',
+              '  Outside the workspace is always denied; no approval can override it.',
+              '  /permissions <profile> switches and saves it. `ask` is accepted as `smart`.',
             ].join('\n'),
           );
           return;
         }
         const chosen = await pick(
           context,
-          args[0],
+          args[0] ? (toProfile(args[0]) ?? args[0]) : undefined,
           'Select permissions',
           [...PERMISSION_PROFILES],
           'permissions',
         );
         if (!chosen || !isProfile(chosen)) return;
         await app.setPermissions(chosen);
+        // The profile is the one setting kept between sessions on its own.
+        await saveConfig({ ...app.config, permissions: app.state.permissions });
       },
     },
     {
@@ -560,23 +588,6 @@ async function pick(
       permissions: context.app.state.permissions,
     }[what] ?? null;
   return context.select(title, options, current);
-}
-
-/** Runtime tool names are not Polaris wire names, so /tools still classifies them. */
-function guessCapability(tool: string): 'read' | 'write' | 'edit' | 'command' | undefined {
-  const name = tool.toLowerCase();
-  if (/run|bash|command|shell/.test(name)) return 'command';
-  if (name.includes('write')) return 'write';
-  if (name.includes('edit')) return 'edit';
-  return undefined;
-}
-
-/** Capabilities the profile removes entirely, so /tools shows them as denied. */
-function deniedCapabilities(profile: Parameters<typeof decide>[0]): string[] {
-  const named = { write: 'Write', edit: 'Edit', command: 'Run Command' } as const;
-  return Object.entries(named)
-    .filter(([capability]) => decide(profile, capability as 'write') === 'deny')
-    .map(([, label]) => label);
 }
 
 export function createRegistry(registry: CommandRegistry): CommandRegistry {

@@ -277,10 +277,10 @@ test('no Polaris tool creates, modifies, moves, deletes or re-permissions anythi
   assert.equal(await fingerprint(outside), beforeOutside, 'nothing outside was touched either');
 });
 
-test('the registry exposes exactly the three read-only tools', () => {
+test('read-only exposes the three read tools and run_command, never a file change', () => {
   assert.deepEqual(
     registry.list().map((tool) => tool.name),
-    ['read_file', 'glob_files', 'grep_text'],
+    ['read_file', 'glob_files', 'grep_text', 'run_command'],
   );
 });
 

@@ -48,6 +48,10 @@ export interface ToolPreview {
    * no meaningful prior state. `execute` receives it back and re-checks it.
    */
   readonly fingerprint: string | null;
+  /** Where a command would run, resolved inside the workspace. */
+  readonly cwd?: string;
+  /** For a write replacing an existing file wholesale: its current length. */
+  readonly replacesLines?: number;
 }
 
 /** JSON Schema subset the tools use; providers pass it through unchanged. */
@@ -178,8 +182,16 @@ export class ToolRegistry {
           if (context.signal?.aborted) throw error;
           return fail(describe(error));
         }
+        const changes = tool.capability === 'write' || tool.capability === 'edit';
         const verdict = await this.#gate.authorize(
-          tool.capability,
+          {
+            capability: tool.capability,
+            target,
+            ...(changes ? { paths: [target] } : {}),
+            ...(tool.capability === 'command' ? { command: target } : {}),
+            ...(preview.cwd ? { cwd: preview.cwd } : {}),
+            ...(preview.replacesLines ? { replacesLines: preview.replacesLines } : {}),
+          },
           {
             title: preview.title ?? tool.title,
             target,

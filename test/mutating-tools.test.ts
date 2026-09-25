@@ -41,7 +41,7 @@ async function run(
     onOutput?: (text: string) => void;
   } = {},
 ): Promise<ToolCallResult> {
-  const profile = options.profile ?? 'ask';
+  const profile = options.profile ?? 'smart';
   const gate = options.gate ?? autoGate(profile, options.answer ?? 'allow').gate;
   return createRegistry(profile, gate).execute(name, input, {
     cwd: workspace,
@@ -93,7 +93,7 @@ test('write_file creates missing parent directories', async () => {
 
 test('the approval shows a diff for a replacement and the whole file for a new one', async () => {
   const seen: Array<{ facts?: readonly string[]; diff?: string }> = [];
-  const gate = new PermissionGate('ask');
+  const gate = new PermissionGate('smart');
   gate.onApproval(async (request) => {
     seen.push(request);
     return 'allow';
@@ -150,7 +150,7 @@ test('a write outside the workspace is refused, symlinks and junctions included'
 });
 
 test('a file changed while the approval was open is not overwritten', async () => {
-  const gate = new PermissionGate('ask');
+  const gate = new PermissionGate('smart');
   gate.onApproval(async () => {
     // Exactly the race the fingerprint exists for: an editor saving, or
     // another agent, between the preview and the write.
@@ -170,7 +170,7 @@ test('a file changed while the approval was open is not overwritten', async () =
 
 test('a cancelled turn leaves no file and no temporary behind', async () => {
   const controller = new AbortController();
-  const gate = new PermissionGate('ask');
+  const gate = new PermissionGate('smart');
   gate.onApproval(async () => {
     controller.abort();
     return 'allow';
@@ -284,7 +284,7 @@ test('a denied edit changes nothing', async () => {
 });
 
 test('the edit approval carries the diff the user is actually agreeing to', async () => {
-  const gate = new PermissionGate('ask');
+  const gate = new PermissionGate('smart');
   let diff = '';
   gate.onApproval(async (request) => {
     diff = request.diff ?? '';
@@ -300,7 +300,7 @@ test('the edit approval carries the diff the user is actually agreeing to', asyn
 });
 
 test('an edit is abandoned when the file moves under the approval', async () => {
-  const gate = new PermissionGate('ask');
+  const gate = new PermissionGate('smart');
   gate.onApproval(async () => {
     await writeFile(
       join(workspace, 'src', 'user.ts'),

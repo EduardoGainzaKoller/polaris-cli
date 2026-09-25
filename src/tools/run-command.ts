@@ -85,6 +85,7 @@ export const runCommandTool: ToolDefinition<RunCommandInput> = {
       title: 'Run command',
       facts: [`cwd: ${where.display}`, `timeout: ${Math.round(input.timeoutMs / 1000)}s`],
       fingerprint: null,
+      cwd: where.absolute,
     };
   },
 

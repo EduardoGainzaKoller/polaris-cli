@@ -227,7 +227,7 @@ test('/new: new conversation, same provider, model and profile, files and all', 
       };
     },
   });
-  const { app, command } = await open(repo, { permissions: 'ask', provider: 'counted' });
+  const { app, command } = await open(repo, { permissions: 'smart', provider: 'counted' });
   await app.setModel('echo-uppercase');
   await app.submit('@write(a.txt :: a1) change');
   const before = app.state;
@@ -240,7 +240,7 @@ test('/new: new conversation, same provider, model and profile, files and all', 
   assert.equal(sessions.closed, closed + 1, 'the old one closed');
   assert.equal(after.provider, before.provider);
   assert.equal(after.model, 'echo-uppercase');
-  assert.equal(after.permissions, 'ask');
+  assert.equal(after.permissions, 'smart');
   assert.equal(after.turns, 0, 'the conversation is gone');
   assert.equal(await read(repo, 'a.txt'), 'a1\n', 'the files are not');
   // A new baseline: session one's change is now the user's to keep.
@@ -273,4 +273,65 @@ test('the exit summary lists what is kept, and nothing when nothing changed', as
   assert.match(app.exitSummary() ?? '', /Changes kept: 1 file\n\s+Verification: passed/);
   await app.close();
   assert.equal(await read(repo, 'a.txt'), 'a1\n', 'exiting never reverts');
+});
+
+// ---------------------------------------------------------- smart permissions
+
+/** Counts approval cards as a person would see them: one per request. */
+function countApprovals(app: PolarisApp) {
+  const seen = new Set<unknown>();
+  let approvalActivities = 0;
+  app.subscribe((state) => {
+    if (state.approval) seen.add(state.approval);
+    if (state.activity.some((activity) => activity.kind === 'approval')) approvalActivities += 1;
+  });
+  return { count: () => seen.size, activities: () => approvalActivities };
+}
+
+test('smart: implement and test is read, edit, write, edit, edit, diff — with no approval', async () => {
+  const repo = await makeRepo({ 'src/a.ts': 'export const a = 1;\n' });
+  const { app } = await open(repo, { permissions: 'smart' });
+  const approvals = countApprovals(app);
+  await app.submit(
+    [
+      'Implement this function and add the necessary tests.',
+      '@read(src/a.ts)',
+      '@edit(src/a.ts :: 1 :: 2)',
+      '@write(src/a.test.ts :: test)',
+      '@edit(src/a.test.ts :: test :: tested)',
+      '@edit(src/a.ts :: 2 :: 3)',
+      '@run(git diff)',
+    ].join(' '),
+  );
+  assert.equal(approvals.count(), 0);
+  assert.equal(approvals.activities(), 0, 'no approval was even shown as waiting');
+  const rows = app.state.messages.filter((message) => message.role === 'tool');
+  assert.deepEqual(
+    rows.map((row) => [row.tool?.name, row.state]),
+    [
+      ['Read', 'complete'],
+      ['Edit', 'complete'],
+      ['Write', 'complete'],
+      ['Edit', 'complete'],
+      ['Edit', 'complete'],
+      ['Run', 'complete'],
+    ],
+  );
+  assert.equal(await read(repo, 'src/a.ts'), 'export const a = 3;\n');
+  assert.equal(app.task.intent, 'testing');
+  await app.close();
+});
+
+test('smart: an edit during an analysis request asks, and running project code always does', async () => {
+  const repo = await makeRepo({ ...CHECK, 'src/a.ts': 'export const a = 1;\n' });
+  const { app } = await open(repo, { permissions: 'smart', answer: 'deny' });
+  const approvals = countApprovals(app);
+  await app.submit('Analyze src/a.ts. @read(src/a.ts) @run(git status) @edit(src/a.ts :: 1 :: 2)');
+  assert.equal(approvals.count(), 1, 'only the unrequested edit');
+  assert.equal(await read(repo, 'src/a.ts'), 'export const a = 1;\n');
+
+  await app.submit('Fix the constant. @edit(src/a.ts :: 1 :: 2) @run(node check.js 0)');
+  assert.equal(approvals.count(), 2, 'the edit goes through; the command asks');
+  assert.equal(await read(repo, 'src/a.ts'), 'export const a = 2;\n');
+  await app.close();
 });

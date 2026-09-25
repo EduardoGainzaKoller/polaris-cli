@@ -17,7 +17,7 @@
     "dev": "tsc && node dist/main.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
+    "test": "node --test --experimental-strip-types --import ./test/setup.ts \"test/**/*.test.ts\"",
     "lint": "biome check src test",
     "check:codex": "npm run build && node scripts/live-check.mjs codex",
     "check:claude": "npm run build && node scripts/live-check.mjs claude",

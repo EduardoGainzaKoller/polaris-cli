@@ -72,6 +72,7 @@ export const writeFileTool: ToolDefinition<WriteFileInput> = {
       facts: [`Replaces ${countLines(before)} lines · +${added} -${removed}`],
       diff: truncateDiff(unifiedDiff(path, before, input.content)),
       fingerprint: hash(before),
+      replacesLines: countLines(before),
     };
   },
 
