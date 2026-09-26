@@ -64,7 +64,14 @@ in CI, but they have not had hands-on use yet — reports are especially welcome
 
 ## Installation
 
-Polaris is not published to npm yet. Install it from source:
+```bash
+npm install -g @eduardogainzakoller/polaris@preview
+```
+
+This installs the `polaris` command. To update, run the same command again; to
+uninstall, `npm uninstall -g @eduardogainzakoller/polaris`.
+
+### From source
 
 ```bash
 git clone https://github.com/EduardoGainzaKoller/polaris-cli.git
@@ -75,10 +82,7 @@ npm link        # makes the `polaris` command available everywhere
 ```
 
 To update later: `git pull && npm install && npm run build`.
-To uninstall: `npm unlink -g polaris`.
-
-Once it is published, installation will be a single command
-(`npm install -g <package-name>`); the package name is not decided yet.
+To uninstall: `npm unlink -g @eduardogainzakoller/polaris`.
 
 ## First run
 
