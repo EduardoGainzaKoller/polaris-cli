@@ -411,3 +411,22 @@ test('the session diff is against the original, and binaries are not printed', a
   assert.equal(binary?.text, 'Binary file changed.');
   await tracker.dispose();
 });
+
+test('undo restores the exact bytes on disk, even when checkout would write other line endings', async () => {
+  const repo = await makeRepo({ 'README.md': 'readme\n' });
+  git(repo, 'config', 'core.autocrlf', 'true');
+  // Written with LF, committed; a checkout here would produce CRLF.
+  await writeFile(join(repo, 'greet.txt'), 'hello world\n');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'greet');
+  const before = await readFile(join(repo, 'greet.txt'));
+
+  const tracker = await ChangeTracker.start(repo);
+  await turn(tracker, async () => {
+    await tracker.capture(['greet.txt']);
+    await writeFile(join(repo, 'greet.txt'), 'hola world\n');
+  });
+  await undoAll(tracker);
+  assert.deepEqual(await readFile(join(repo, 'greet.txt')), before, 'byte for byte');
+  await tracker.dispose();
+});

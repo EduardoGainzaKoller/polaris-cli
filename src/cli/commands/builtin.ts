@@ -14,6 +14,7 @@ import { listProviders } from '../../providers/provider.ts';
 import { MAX_SESSION_DIFF_LINES } from '../../tools/limits.ts';
 import { statusOf } from '../../ui/activity.ts';
 import { shortenPath } from '../../ui/output.ts';
+import { FEEDBACK_URL, VERSION } from '../../version.ts';
 import type { CommandRegistry } from './registry.ts';
 import type { Command, CommandContext } from './types.ts';
 
@@ -26,10 +27,12 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
       aliases: ['?'],
       run({ app }) {
         app.notice(
-          registry
-            .list()
-            .map((command) => `  /${command.name.padEnd(12)} ${command.summary}`)
-            .join('\n'),
+          [
+            ...registry.list().map((command) => `  /${command.name.padEnd(12)} ${command.summary}`),
+            '',
+            `  Polaris ${VERSION} · Developer Preview — feedback welcome${FEEDBACK_URL ? `: ${FEEDBACK_URL}` : ''}`,
+            '  Problems? Run `polaris doctor` in a terminal.',
+          ].join('\n'),
         );
       },
     },
@@ -40,6 +43,7 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
         const state = app.state;
         const usage = await app.usage();
         const session = [
+          `  polaris   ${VERSION} · Developer Preview`,
           `  cwd       ${shortenPath(state.cwd)}`,
           `  provider  ${state.provider}`,
           `  model     ${state.model}`,

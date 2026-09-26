@@ -1,6 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { debug } from '../../core/logger.ts';
+import { killTree, resolveExecutable, spawnPlan } from '../../core/process.ts';
 import { runtimeStopped, sessionClosed, toPolarisError } from './errors.ts';
 
 /**
@@ -33,7 +34,18 @@ const EXECUTABLE = process.env.POLARIS_CODEX_EXECUTABLE ?? 'codex';
 export const connectToAppServer: Connect = async () => {
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn(EXECUTABLE, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // Resolved the way a shell would, so an npm-installed `codex.cmd` on
+    // Windows starts as readily as the native `codex.exe`.
+    const path = await resolveExecutable(EXECUTABLE);
+    if (!path) throw new Error(`spawn ${EXECUTABLE} ENOENT`);
+    const plan = spawnPlan(path);
+    child = spawn(plan.command, ['app-server'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: plan.shell,
+      windowsHide: true,
+      // Its own process group, so closing it takes every command it started.
+      ...(process.platform === 'win32' ? {} : { detached: true }),
+    }) as ChildProcessWithoutNullStreams;
   } catch (error) {
     throw toPolarisError(error);
   }
@@ -155,7 +167,8 @@ function createConnection(child: ChildProcessWithoutNullStreams): CodexConnectio
       if (closed) return;
       closed = sessionClosed();
       child.stdin.end();
-      child.kill();
+      // The app server and anything it is running — no orphaned commands.
+      killTree(child.pid);
     },
   };
 }

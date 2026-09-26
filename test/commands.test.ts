@@ -234,7 +234,8 @@ test('/config shows the file and values, /config save writes them', async () => 
 
     const written = JSON.parse(await readFile(join(home, 'config.json'), 'utf8')) as unknown;
     const saved = { provider: 'mock', permissions: 'smart', model: 'echo', effort: 'medium' };
-    assert.deepEqual(written, saved);
+    // The file carries its format version; the loaded settings do not need it.
+    assert.deepEqual(written, { version: 1, ...saved });
     assert.deepEqual(await loadConfig(), saved);
     await h.app.close();
   } finally {

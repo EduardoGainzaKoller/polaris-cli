@@ -5,7 +5,7 @@ and why it was built that way.
 
 ## Requirements
 
-Node.js >= 24. Runtime dependencies: the official `@anthropic-ai/sdk` and
+Node.js >= 22 (Ink, the terminal UI, needs 22; nothing else needs more). Runtime dependencies: the official `@anthropic-ai/sdk` and
 `@anthropic-ai/claude-agent-sdk`, `ink` and `react` for the terminal UI, `ignore` to
 honour `.gitignore`, `diff` for previews, `yaml` for skill frontmatter and `zod` for the
 Agent SDK's custom tools. The Codex provider needs no package — it drives the Codex CLI you already
@@ -31,6 +31,40 @@ polaris
 ```
 
 During development, `npm run dev` compiles and runs in one step.
+
+## First run, doctor and logs
+
+**First run.** When no `~/.polaris/config.json` exists, `polaris` shows a short Developer
+Preview notice, detects which providers are usable — using only their local status
+commands (`codex login status`, `claude auth status`) and whether `ANTHROPIC_API_KEY` is
+set, never a model request — and asks you to choose one. The choice is saved with the
+`smart` permission profile. Cancelling saves nothing, so the setup runs again next time.
+Without a terminal (a pipe, a script) the notice is printed and the defaults are used.
+
+**`polaris doctor`** checks Node, the OS and terminal, Git, each provider, the
+configuration and the current folder (readable, writable, Git repository, `POLARIS.md`,
+skills), then says whether Polaris is ready. It opens no UI, modifies nothing and never
+contacts a model; every external check has a 5-second timeout. It exits `1` only when
+something prevents Polaris from running at all (an unsupported Node, an invalid
+configuration, an unreadable folder). `polaris doctor --report` also saves
+`polaris-report-<date>.txt` in the current folder — the checks, the configuration's shape
+and recent error lines, with your home directory shown as `~` and credentials redacted —
+for you to attach to an issue if you choose.
+
+**Configuration** lives in `~/.polaris/config.json` (`POLARIS_HOME` moves the whole
+directory). It carries a `version` field; fields Polaris does not recognise are kept when
+it saves. A file that cannot be parsed stops Polaris with its path and is never
+overwritten. The v0.6 profile name `ask` is read as `smart`.
+
+**Logs.** Each interactive session writes `~/.polaris/logs/polaris-<time>-<pid>.log` with
+startup facts (versions, OS, provider, model), lifecycle events and errors; `--debug` adds
+everything else. The latest 10 are kept, each capped at 5 MB. API keys, tokens,
+authorization headers, cookies and `*_KEY=`/`*_TOKEN=`-style values are redacted before
+anything is written. Nothing is ever uploaded.
+
+**Leftovers.** Checkpoint copies live in a temporary directory that is removed when a
+session ends; stores left behind by a crashed session are removed at the next startup once
+they are three days old.
 
 ## Tools
 

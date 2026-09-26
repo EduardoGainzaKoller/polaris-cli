@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 import { debug } from '../core/logger.ts';
+import { killTree } from '../core/process.ts';
 import { executableName, parseCommand } from '../permissions/shell.ts';
 import {
   COMMAND_OUTPUT_HEAD_LINES,
@@ -183,10 +184,10 @@ function runProcess(
 
     const timer = setTimeout(() => {
       timedOut = true;
-      terminate(child.pid);
+      killTree(child.pid);
     }, input.timeoutMs);
 
-    const onAbort = () => terminate(child.pid);
+    const onAbort = () => killTree(child.pid);
     signal?.addEventListener('abort', onAbort, { once: true });
 
     const done = () => {
@@ -237,37 +238,6 @@ export function environmentFor(command: string): NodeJS.ProcessEnv {
   if (!parsed || executableName(parsed.argv[0] ?? '') !== 'git') return process.env;
   const { GIT_EXTERNAL_DIFF: _external, ...rest } = process.env;
   return { ...rest, GIT_PAGER: 'cat', PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' };
-}
-
-/**
- * Kills the command *and* everything it started. A test runner spawns workers;
- * killing only the shell would leave them running and holding ports.
- *
- * Windows has no process groups, so `taskkill /T` walks the tree; elsewhere the
- * negative pid signals the whole group the child leads, with SIGKILL behind it
- * for anything that ignores SIGTERM.
- */
-function terminate(pid: number | undefined): void {
-  if (pid === undefined) return;
-  if (process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }).on(
-      'error',
-      () => undefined,
-    );
-    return;
-  }
-  try {
-    process.kill(-pid, 'SIGTERM');
-    setTimeout(() => {
-      try {
-        process.kill(-pid, 'SIGKILL');
-      } catch {
-        // Already gone, which is the outcome we wanted.
-      }
-    }, 2000).unref();
-  } catch {
-    // Already gone.
-  }
 }
 
 /** Keeps the head and the tail: a failure is usually at the end, the context at the start. */

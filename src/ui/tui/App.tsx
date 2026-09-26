@@ -236,7 +236,7 @@ export function App({ app, registry, history: initialHistory = [], onHistory }: 
         </Text>
         <Text color={palette.text} bold>{` ${state.project}`}</Text>
         <Box flexGrow={1} />
-        <Text color={palette.subtle}>{`v${VERSION}`}</Text>
+        <Text color={palette.subtle}>{`v${VERSION} · Developer Preview`}</Text>
       </Box>
 
       {/* Body */}

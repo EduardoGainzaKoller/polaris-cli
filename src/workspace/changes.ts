@@ -1,5 +1,15 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { debug } from '../core/logger.ts';
@@ -181,7 +191,7 @@ export class ChangeTracker {
         if (!path) continue;
         this.#announced.add(path);
         if (this.#baseline.has(path)) continue;
-        const original = (await this.#fromHead(path)) ?? (await this.#snapshot(path));
+        const original = await this.#original(path);
         this.#baseline.set(path, original);
         this.#seen.set(path, original.hash);
       }
@@ -456,10 +466,25 @@ export class ChangeTracker {
   }
 
   /** The file at the baseline commit, when it was tracked there. */
-  async #fromHead(path: string): Promise<Version | null> {
-    if (!this.#git || !this.#baseHead) return null;
-    const version = await this.#atBaseCommit(path);
-    return version.hash === ABSENT ? null : version;
+  /**
+   * A file's original, captured just before a tool changes it. The bytes on
+   * disk are the truth — line endings included, whatever `core.autocrlf`
+   * would produce on checkout — as long as they are still the committed
+   * content. If they already differ from the commit, a runtime changed the
+   * file before Polaris heard about it, and the commit is the original.
+   */
+  async #original(path: string): Promise<Version> {
+    const disk = await fingerprint(this.#absolute(path));
+    if (!this.#git || !this.#baseHead) return this.#snapshot(path, disk);
+    let committed: Buffer | null;
+    try {
+      committed = await this.#git.fileAt(this.#baseHead, path);
+    } catch {
+      return this.#snapshot(path, disk);
+    }
+    if (!committed) return this.#snapshot(path, disk);
+    if (disk.content && sameText(disk.content, committed)) return this.#snapshot(path, disk);
+    return { hash: sha256(committed), source: 'git' };
   }
 
   async #atBaseCommit(path: string): Promise<Version> {
@@ -540,6 +565,13 @@ function sha256(content: Uint8Array): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
+/** Equal apart from line endings: what a checkout with `autocrlf` would change. */
+function sameText(a: Buffer, b: Buffer): boolean {
+  if (a.equals(b)) return true;
+  const lf = (buffer: Buffer) => buffer.toString('latin1').replaceAll('\r\n', '\n');
+  return lf(a) === lf(b);
+}
+
 function isBinary(content: Buffer): boolean {
   return content.subarray(0, BINARY_SNIFF_BYTES).includes(0);
 }
@@ -583,4 +615,38 @@ class SnapshotStore {
       debug('changes', 'could not remove', directory, error),
     );
   }
+}
+
+/** Checkpoint stores untouched this long belong to sessions that ended badly. */
+export const STALE_CHECKPOINT_MS = 3 * 24 * 60 * 60 * 1000;
+
+/**
+ * Removes checkpoint stores left behind by sessions that crashed or were
+ * killed. Conservative on purpose: only Polaris's own `polaris-checkpoints-*`
+ * directories, and only ones nobody has written to for days — a live session
+ * writes to its store every time it takes a checkpoint. Never throws.
+ */
+export async function sweepStaleCheckpoints(
+  directory = tmpdir(),
+  now = Date.now(),
+  maxAge = STALE_CHECKPOINT_MS,
+): Promise<string[]> {
+  const removed: string[] = [];
+  try {
+    for (const name of await readdir(directory)) {
+      if (!name.startsWith('polaris-checkpoints-')) continue;
+      const path = join(directory, name);
+      try {
+        const info = await stat(path);
+        if (!info.isDirectory() || now - info.mtimeMs < maxAge) continue;
+        await rm(path, { recursive: true, force: true });
+        removed.push(path);
+      } catch {
+        // In use, or already gone.
+      }
+    }
+  } catch (error) {
+    debug('changes', 'could not sweep old checkpoints', error);
+  }
+  return removed;
 }
