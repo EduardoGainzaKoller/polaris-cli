@@ -1,0 +1,5 @@
+# One line ending everywhere. Biome enforces LF, and a CRLF shebang
+# (`#!/usr/bin/env node\r`) breaks the installed command on macOS and Linux.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
