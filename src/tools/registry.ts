@@ -231,22 +231,36 @@ const ALL_TOOLS = [
  * the model at all — under `read-only` there is no `write_file` to call, which
  * is a stronger guarantee than a prompt that says not to.
  */
-export function createRegistry(profile: PermissionProfile, gate?: PermissionGate): ToolRegistry {
-  return new ToolRegistry(
-    ALL_TOOLS.filter((tool) => isAvailable(profile, tool.capability)),
-    gate,
-  );
+export function createRegistry(
+  profile: PermissionProfile,
+  gate?: PermissionGate,
+  capabilities?: readonly Capability[],
+): ToolRegistry {
+  return new ToolRegistry(available(profile, capabilities), gate);
 }
 
 /** How Polaris-executed tools are described to the UI and to /tools. */
-export function polarisAccess(profile: PermissionProfile): ToolAccess {
+export function polarisAccess(
+  profile: PermissionProfile,
+  capabilities?: readonly Capability[],
+): ToolAccess {
   return {
     mode: profile,
     runtime: 'Polaris',
-    tools: ALL_TOOLS.filter((tool) => isAvailable(profile, tool.capability)).map(
-      (tool) => tool.name,
-    ),
+    tools: available(profile, capabilities).map((tool) => tool.name),
   };
+}
+
+/** The profile's tools, within an agent's ceiling when there is one. */
+function available(
+  profile: PermissionProfile,
+  capabilities: readonly Capability[] | undefined,
+): ToolDefinition[] {
+  return ALL_TOOLS.filter(
+    (tool) =>
+      isAvailable(profile, tool.capability) &&
+      (!capabilities || capabilities.includes(tool.capability)),
+  );
 }
 
 /** Capability of a Polaris tool by wire name, for /tools. */

@@ -1,3 +1,5 @@
+import { toolNames } from '../../agents/registry.ts';
+import { resultReport } from '../../agents/result.ts';
 import { configPath, saveConfig } from '../../config/config.ts';
 import { type Activity, ago, clock } from '../../core/activity.ts';
 import type { AppState } from '../../core/app.ts';
@@ -61,6 +63,7 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
           `  session   ${state.status === 'error' ? 'error' : 'active'}`,
           `  activity  ${activityRow(state.activity)}`,
           ...contextRows(state.context),
+          `  agents    ${state.agents.available} available${state.agents.running.length > 0 ? ` · ${state.agents.running.map((run) => run.agent).join(', ')} running` : ''}`,
           '',
           ...workspaceRows(state.workspace),
         ];
@@ -402,9 +405,17 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
         for (const activity of live) {
           const pad = '  '.repeat(depth(activity) + 1);
           const leaf = !live.some((child) => child.parentId === activity.id);
+          const head =
+            activity.kind === 'command'
+              ? `Run ${activity.label}`
+              : activity.kind === 'tool' && activity.tool
+                ? `${activity.tool} ${activity.label}`
+                : activity.kind === 'agent'
+                  ? `Agent ${activity.label}`
+                  : activity.label;
           lines.push(
             '',
-            `${pad}${activity.kind === 'command' ? `Run ${activity.label}` : activity.label}`,
+            `${pad}${head}`,
             `${pad}  state          ${activity.state}`,
             `${pad}  elapsed        ${clock(now - activity.startedAt)}`,
             `${pad}  last activity  ${ago(now - activity.lastActivityAt)} ago`,
@@ -508,6 +519,53 @@ export function builtinCommands(registry: CommandRegistry): Command[] {
         if (await app.loadSkill(name)) {
           app.notice(`Skill loaded: ${name}. It stays active for this conversation.`);
         }
+      },
+    },
+    {
+      name: 'agents',
+      summary: 'List the agents Polaris can delegate to',
+      run({ app }) {
+        const state = app.state;
+        const running = new Map(state.agents.running.map((run) => [run.agent, run]));
+        const lines = [
+          '  Agents',
+          '',
+          '  main',
+          `    active · ${state.provider} · ${state.model} · ${state.permissions}`,
+        ];
+        for (const agent of app.agents.registry.list()) {
+          const run = running.get(agent.name);
+          lines.push(
+            '',
+            `  ${agent.name}`,
+            `    ${run ? `running (${clock(Date.now() - run.startedAt)})` : 'available'} · ${agent.permissions}`,
+            `    ${agent.description}`,
+            `    tools: ${toolNames(agent.capabilities).join(', ')} · provider: ${agent.provider} · model: ${agent.model}`,
+          );
+        }
+        lines.push(
+          '',
+          '  The main agent delegates on its own when an isolated exploration helps.',
+          '  /agent <name> <task> runs one yourself; its result is shown to you only.',
+        );
+        app.notice(lines.join('\n'));
+      },
+    },
+    {
+      name: 'agent',
+      blockedByApproval: true,
+      summary: 'Run an agent yourself: /agent <name> <task>',
+      run: async ({ app }, args) => {
+        const [name, ...words] = args;
+        const task = words.join(' ').trim();
+        if (!name || !task) {
+          app.notice('Usage: /agent <name> <task>. /agents lists them.', 'error');
+          return;
+        }
+        // Exactly the delegation path; the result is shown, never given to
+        // the main agent.
+        const result = await app.runAgent(name, task);
+        app.notice(resultReport(result), result.status === 'failed' ? 'error' : 'system');
       },
     },
     {

@@ -40,6 +40,7 @@ export function activityRows(
     (activity) =>
       activity.kind === 'approval' ||
       activity.kind === 'model' ||
+      activity.kind === 'agent' ||
       activity.kind === 'verification' ||
       now - activity.startedAt >= SHOW_AFTER_MS,
   );
@@ -143,6 +144,8 @@ function doingOf(activity: Activity): string {
       return 'streaming response';
     case 'waiting-tool':
       return 'running tools';
+    case 'waiting-agent':
+      return 'waiting for agent result';
     default:
       break;
   }
@@ -178,14 +181,22 @@ export function activitySummary(live: readonly Activity[], now: number): string 
     [...live].reverse().find((activity) => !live.some((child) => child.parentId === activity.id)) ??
     (live.at(-1) as Activity);
   const level = liveness(leaf, now);
-  const name =
+  const doing =
     leaf.kind === 'model'
       ? leaf.state === 'streaming'
         ? 'streaming'
         : 'waiting for model'
       : leaf.kind === 'command' || leaf.kind === 'tool'
         ? headOf(leaf).replace(/^Run /, '')
-        : leaf.label;
+        : leaf.kind === 'agent'
+          ? `${leaf.label} · ${leaf.state === 'streaming' ? 'writing result' : 'thinking'}`
+          : leaf.label;
+  // Work inside an agent says whose it is: `repository-explorer · Grep "auth"`.
+  const agent =
+    leaf.kind !== 'agent' && leaf.ownerId
+      ? live.find((activity) => activity.kind === 'agent' && activity.ownerId === leaf.ownerId)
+      : undefined;
+  const name = agent ? `${agent.label} · ${doing}` : doing;
   const elapsed = clock(now - leaf.startedAt);
   if (level === 'silent' || level === 'slow') {
     return `${name} · ${elapsed} · no activity ${ago(now - leaf.lastActivityAt)}`;

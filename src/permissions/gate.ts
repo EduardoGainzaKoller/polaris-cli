@@ -44,6 +44,12 @@ export type Verdict = (
 
 export const DENIED_BY_USER = 'Permission denied by the user.';
 
+/** What an agent's gate allows at most, whatever its profile would. */
+export interface AgentCeiling {
+  readonly name: string;
+  readonly capabilities: readonly Capability[];
+}
+
 /** What a provider shows on the card, beyond what the operation says. */
 export type ApprovalCard = Omit<ApprovalRequest, 'id' | 'capability' | 'high'>;
 
@@ -71,10 +77,16 @@ export class PermissionGate {
   /** Files this task has changed, for spotting an unexpectedly broad change. */
   readonly #edited = new Set<string>();
   #broadChangeApproved = false;
+  /** An agent's gate: its capability ceiling, and nobody to ask. */
+  readonly #agent: AgentCeiling | null;
 
-  constructor(profile: PermissionProfile, options: { workspace?: string } = {}) {
+  constructor(
+    profile: PermissionProfile,
+    options: { workspace?: string; agent?: AgentCeiling } = {},
+  ) {
     this.#profile = profile;
     this.#workspace = options.workspace ?? null;
+    this.#agent = options.agent ?? null;
   }
 
   get profile(): PermissionProfile {
@@ -125,6 +137,26 @@ export class PermissionGate {
   ): Promise<Verdict> {
     const decision = await this.#decide(operation);
     debug('permissions', operation.target, '→', decision.decision, 'reason:', decision.reason);
+
+    // An agent's ceiling is not a question for anyone: what lies outside it
+    // is unavailable, and an agent never puts an approval to the user.
+    if (this.#agent && decision.decision !== 'deny') {
+      const { name, capabilities } = this.#agent;
+      if (!capabilities.includes(operation.capability)) {
+        return {
+          allowed: false,
+          reason: `${operation.capability} is not available to ${name}.`,
+          decision: { ...decision, decision: 'deny' },
+        };
+      }
+      if (decision.decision === 'ask') {
+        return {
+          allowed: false,
+          reason: `${name} cannot ask for approval, and this is outside what it may do on its own: ${decision.reason}`,
+          decision: { ...decision, decision: 'deny' },
+        };
+      }
+    }
 
     if (decision.decision === 'allow') {
       this.#record(operation);

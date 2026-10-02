@@ -91,3 +91,27 @@ export const MAX_SKILL_DESCRIPTION = 1024;
 
 /** Reference files listed for one skill. */
 export const MAX_SKILL_REFERENCES = 50;
+
+// ------------------------------------------------------------------ agents
+
+/** Agents below the main agent. 1: an agent can never delegate again. */
+export const MAX_DELEGATION_DEPTH = 1;
+
+/** Child agents one parent may have running at once. */
+export const MAX_ACTIVE_CHILDREN = 1;
+
+/** Delegations in one user turn; a guard against a model delegating in a loop. */
+export const MAX_DELEGATIONS_PER_TURN = 3;
+
+/** Tool calls one agent run may make before it is stopped with what it has. */
+export const AGENT_MAX_TOOL_CALLS = 40;
+
+/** Wall time for one agent run. A budget, not an inactivity timeout. */
+export const AGENT_MAX_RUNTIME_MS = 5 * 60_000;
+
+/** Characters of an agent's result returned to its parent. */
+export const MAX_DELEGATION_RESULT_CHARS = 8_000;
+
+/** Characters of a delegated task and of the user's objective given to an agent. */
+export const MAX_DELEGATED_TASK_CHARS = 4_000;
+export const MAX_OBJECTIVE_CHARS = 2_000;

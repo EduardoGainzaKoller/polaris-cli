@@ -118,6 +118,8 @@ export async function runRepl(app: PolarisApp): Promise<void> {
 function createPrinter() {
   const written = new Map<string, number>();
   const closed = new Set<string>();
+  /** True while an answer's last line is unfinished: a tool row must not join it. */
+  let midLine = false;
 
   return {
     render(state: AppState): void {
@@ -133,17 +135,26 @@ function createPrinter() {
           const { name, target, detail } = message.tool;
           const marker = message.state === 'error' ? theme.error('×') : theme.dim('●');
           const outcome = message.state === 'cancelled' ? 'cancelled' : detail;
-          ui.line(`${marker} ${name} ${target}${outcome ? theme.dim(` · ${outcome}`) : ''}`);
+          // An agent's tool calls finish before the agent does, so they are
+          // printed first, indented as what they are: its work.
+          const indent = '  '.repeat(message.depth ?? 0);
+          if (midLine) ui.line();
+          midLine = false;
+          ui.line(
+            `${indent}${marker} ${name} ${target}${outcome ? theme.dim(` · ${outcome}`) : ''}`,
+          );
           continue;
         }
         const already = written.get(message.id) ?? 0;
         if (message.text.length > already) {
           process.stdout.write(prefix(message, already) + message.text.slice(already));
           written.set(message.id, message.text.length);
+          midLine = !message.text.endsWith('\n');
         }
         if (message.state !== 'streaming' && !closed.has(message.id)) {
           closed.add(message.id);
           if ((written.get(message.id) ?? 0) > 0) ui.line();
+          midLine = false;
           if (message.state === 'cancelled') ui.info('Cancelled.');
           ui.line();
         }

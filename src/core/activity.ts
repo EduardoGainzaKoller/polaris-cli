@@ -14,13 +14,15 @@ import { debug } from './logger.ts';
  * One tracker per Polaris session, not a global: a future team of agents gets
  * one tree per owner.
  */
-export type ActivityKind = 'model' | 'tool' | 'command' | 'approval' | 'verification';
+export type ActivityKind = 'model' | 'tool' | 'command' | 'approval' | 'verification' | 'agent';
 
 export type ActivityState =
   | 'waiting-model'
   | 'waiting-runtime'
   | 'waiting-tool'
   | 'waiting-approval'
+  /** A turn whose model handed a task to an agent and is waiting for its result. */
+  | 'waiting-agent'
   | 'streaming'
   | 'running'
   | 'cancelling'
@@ -44,7 +46,7 @@ export interface Activity {
   /** Last line of output, for commands. */
   readonly lastOutputAt?: number;
   readonly parentId?: string;
-  /** Whose work this is — one day an agent's id. */
+  /** Whose work this is: an agent run's id, for the agent and everything under it. */
   readonly ownerId?: string;
   /** The last few lines of output, for the eye only; the model gets the tool result. */
   readonly tail: readonly string[];
@@ -79,6 +81,7 @@ export class ActivityTracker {
     command: 0,
     approval: 0,
     verification: 0,
+    agent: 0,
   };
 
   constructor(now: () => number = Date.now) {

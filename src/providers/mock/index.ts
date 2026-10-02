@@ -1,3 +1,4 @@
+import { RESULT_CONTRACT } from '../../agents/result.ts';
 import { PolarisError } from '../../core/errors.ts';
 import { PERMISSION_PROFILES } from '../../permissions/policy.ts';
 import { streamOutput, toolFinished, toolStarted } from '../../tools/events.ts';
@@ -20,13 +21,20 @@ import type {
  *   @wait(200)
  *   @skill(spring-boot-testing)   @ref(spring-boot-testing :: references/x.md)
  *   @context()   — answers with every instruction this session has received
+ *   @delegate[repository-explorer :: Find the auth flow @read(a.ts) @grep(Token)]
+ *                — hands the task to an agent; the directives inside run there
+ *   @answer[text] — answers exactly `text` instead of echoing
+ *
+ * Given a delegated task (its message asks for a JSON result), the mock answers
+ * like an explorer would: a JSON result built from the tools it actually ran.
  *
  * The tools are the real Polaris registry, running against the real workspace
  * under the real permission gate; only the "model" deciding to call them is
  * scripted. That makes a denied approval, a failing command and a full
  * read → edit → run loop all reproducible in a test.
  */
-const DIRECTIVE = /@(read|glob|grep|write|edit|run|wait|skill|ref|context)\(([\s\S]*?)\)(?=\s|$)/g;
+const DIRECTIVE =
+  /@(delegate|answer)\[([^\]]*)\]|@(read|glob|grep|write|edit|run|wait|skill|ref|context)\(([\s\S]*?)\)(?=\s|$)/g;
 
 const TOOL_FOR = {
   read: 'read_file',
@@ -68,7 +76,7 @@ export const mockProvider: ModelProvider = {
   id: 'mock',
   supports: PERMISSION_PROFILES,
   async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
-    const registry = createRegistry(options.permissions, options.gate);
+    const registry = createRegistry(options.permissions, options.gate, options.capabilities);
     const history: string[] = [];
     let calls = 0;
     // Counted rather than invented: characters actually sent and echoed,
@@ -84,7 +92,7 @@ export const mockProvider: ModelProvider = {
 
     return {
       model: options.model ?? 'echo',
-      access: polarisAccess(options.permissions),
+      access: polarisAccess(options.permissions, options.capabilities),
       get effort() {
         return effort;
       },
@@ -105,8 +113,25 @@ export const mockProvider: ModelProvider = {
         tokens = { ...tokens, input: tokens.input + Math.ceil(input.length / 4) };
         yield { type: 'message-start' };
 
-        for (const [, kind, argument = ''] of input.matchAll(DIRECTIVE)) {
+        /** What this turn's tools found, for an agent's answer. */
+        const found: Array<{ tool: string; target: string; summary: string }> = [];
+        let answer: string | null = null;
+        for (const match of input.matchAll(DIRECTIVE)) {
           signal?.throwIfAborted();
+          const kind = match[1] ?? match[3] ?? '';
+          const argument = match[2] ?? match[4] ?? '';
+          if (kind === 'answer') {
+            answer = argument;
+            continue;
+          }
+          if (kind === 'delegate') {
+            const [agent = '', ...task] = argument.split('::').map((part) => part.trim());
+            const reply = context
+              ? await context.delegate(agent, task.join('::'))
+              : { ok: false, text: 'Delegation is not available here.' };
+            received.push(reply.text);
+            continue;
+          }
           if (kind === 'wait') {
             await sleep(Number(argument) || 0, signal);
             continue;
@@ -139,11 +164,23 @@ export const mockProvider: ModelProvider = {
             }),
           );
           yield toolFinished(id, result);
+          if (result.ok)
+            found.push({
+              tool: result.title,
+              target: result.target,
+              summary: result.output.summary,
+            });
         }
 
-        const text = input.replace(DIRECTIVE, '').trim() || input;
+        const text =
+          answer ??
+          (input.includes(RESULT_CONTRACT)
+            ? explorerAnswer(found)
+            : input.replace(DIRECTIVE, '').trim() || input);
         tokens = { ...tokens, output: tokens.output + Math.ceil(text.length / 4) };
-        for (const piece of chunks(text)) {
+        for (const piece of answer !== null || input.includes(RESULT_CONTRACT)
+          ? [text]
+          : chunks(text)) {
           signal?.throwIfAborted();
           yield { type: 'text-delta', text: piece };
         }
@@ -173,6 +210,23 @@ export const mockProvider: ModelProvider = {
     };
   },
 };
+
+/** A delegated task's answer: the contract's JSON, from what the tools really returned. */
+function explorerAnswer(
+  found: ReadonlyArray<{ tool: string; target: string; summary: string }>,
+): string {
+  const files = found.filter((item) => item.tool === 'Read').map((item) => item.target);
+  return JSON.stringify({
+    summary: `Mock exploration: ${found.length} tool calls, ${files.length} files read.`,
+    relevantFiles: files,
+    findings: found.map((item) => ({
+      statement: `${item.tool} ${item.target}: ${item.summary}`,
+      basis: 'observed',
+      ...(item.tool === 'Read' ? { file: item.target } : {}),
+    })),
+    openQuestions: [],
+  });
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

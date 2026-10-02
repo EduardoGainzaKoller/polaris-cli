@@ -1,4 +1,13 @@
 import { basename } from 'node:path';
+import {
+  type AgentEvent,
+  AgentManager,
+  type AgentRun,
+  MAIN_AGENT,
+  USER,
+} from '../agents/manager.ts';
+import { AgentRegistry } from '../agents/registry.ts';
+import { type DelegationResult, resultLine } from '../agents/result.ts';
 import { type PolarisConfig, polarisHome } from '../config/config.ts';
 import { type ContextEvent, ContextManager } from '../context/manager.ts';
 import type { ApprovalDecision, ApprovalRequest } from '../permissions/gate.ts';
@@ -43,6 +52,7 @@ export type AppStatus =
   | 'running'
   | 'switching'
   | 'approving'
+  | 'delegating'
   | 'cancelled'
   | 'error';
 
@@ -72,6 +82,8 @@ export interface UiMessage {
   readonly tool?: ToolCall;
   /** Footer for a finished answer: model, effort and how long the turn took. */
   readonly meta?: string;
+  /** Nesting under an agent's row: 1 for the agent's own tool calls. */
+  readonly depth?: number;
 }
 
 /** What the UI shows about the workspace itself, never about a provider. */
@@ -112,6 +124,14 @@ export interface AppState {
    * not here: it is a transcript row with its duration.
    */
   readonly activity: readonly Activity[];
+  readonly agents: AgentsState;
+}
+
+/** Agents, as the UI shows them. */
+export interface AgentsState {
+  readonly available: number;
+  /** Runs going right now. */
+  readonly running: readonly AgentRun[];
 }
 
 /** Project instructions and skills, as the UI shows them. */
@@ -161,6 +181,17 @@ export class PolarisApp {
   };
   /** Transcript entries of skills still loading, by name. */
   readonly #loadingSkills = new Map<string, string>();
+  readonly #agents: AgentManager;
+  /** Each live agent run's activity, transcript row and running tools. */
+  readonly #agentRuns = new Map<
+    string,
+    {
+      activity: string;
+      entry: string;
+      parent: string | null;
+      tools: Map<string, { entry: string; name: string; activity: string }>;
+    }
+  >();
 
   constructor(options: {
     cwd: string;
@@ -180,6 +211,22 @@ export class PolarisApp {
       home: options.home ?? polarisHome(),
     });
     this.#context.onEvent((event) => this.#onContextEvent(event));
+    this.#agents = new AgentManager({
+      registry: AgentRegistry.builtin(),
+      context: this.#context,
+      workspace: options.cwd,
+      spawn: (spec) => this.#session.spawnChild(spec),
+      watch: {
+        settle: () => this.#observe('polaris'),
+        changed: async () => {
+          const changed = (await this.#tracker?.reconcile('polaris')) ?? [];
+          if (changed.length > 0) this.#verifier.mutated();
+          return changed;
+        },
+      },
+      ...(options.clock ? { clock: options.clock } : {}),
+    });
+    this.#agents.onEvent((event) => this.#onAgentEvent(event));
     // A config that names no profile gets the default, never a wider one: the
     // safe fallback is the point of having a default at all.
     const profile = toProfile(options.config.permissions ?? '') ?? DEFAULT_PROFILE;
@@ -190,13 +237,7 @@ export class PolarisApp {
     // Without a UI that can render an approval there is nobody to consent, and
     // the gate denies rather than waiting forever for an answer.
     if (options.approvals === false) {
-      this.#session = new Session({
-        cwd: this.cwd,
-        config: this.#config,
-        gate: this.#gate,
-        context: this.#context,
-        activity: this.#runtimeActivity,
-      });
+      this.#session = this.#newSession(this.#config);
       return;
     }
     // Every approval, from any runtime, arrives here and becomes one piece of
@@ -227,11 +268,18 @@ export class PolarisApp {
           this.#set('approving');
         }),
     );
-    this.#session = new Session({
+    this.#session = this.#newSession(this.#config);
+  }
+
+  /** The main agent's session: its gate, its context and the way it delegates. */
+  #newSession(config: PolarisConfig): Session {
+    return new Session({
       cwd: this.cwd,
-      config: this.#config,
+      config,
       gate: this.#gate,
       context: this.#context,
+      activity: this.#runtimeActivity,
+      delegation: this.#agents.port(MAIN_AGENT),
     });
   }
 
@@ -265,6 +313,7 @@ export class PolarisApp {
       approval: this.#approval?.request ?? null,
       workspace: this.#workspace(),
       activity: this.#activity.live(),
+      agents: { available: this.#agents.registry.list().length, running: this.#agents.live() },
       context: {
         sources: this.#context.project.sources.map((source) => source.display),
         available: this.#context.skills.list().length,
@@ -453,10 +502,14 @@ export class PolarisApp {
     this.#turn = controller;
     this.#set('thinking');
     const startedAt = Date.now();
-    const turnActivity = this.#activity.start('model', runtimeName(this.#session.providerId), {
-      state: 'waiting-model',
-      ...(parent ? { parentId: parent } : {}),
-    });
+    const turnActivity = this.#activity.start(
+      'model',
+      `Main agent · ${runtimeName(this.#session.providerId)}`,
+      {
+        state: 'waiting-model',
+        ...(parent ? { parentId: parent } : {}),
+      },
+    );
     this.#turnActivity = turnActivity;
     // Whatever changed while Polaris was idle is the user's, and is set aside
     // before the turn can be blamed for it.
@@ -474,9 +527,21 @@ export class PolarisApp {
       if (answer) this.#update(answer, (message) => ({ ...message, state }));
       answer = null;
     };
-    // A skill load is shown where it happened: text after it starts a new
-    // answer, exactly as it does after a tool call.
+    // A skill load or an agent is shown where it happened: text after it
+    // starts a new answer, exactly as it does after a tool call.
     const stopSealing = this.#context.onEvent(() => seal('complete'));
+    const stopSealingAgents = this.#agents.onEvent((event) => {
+      if (event.type === 'run-start') seal('complete');
+    });
+    // What this request may delegate is counted from the user's own message.
+    this.#agents.beginTurn({
+      runId: MAIN_AGENT,
+      depth: 0,
+      objective: text,
+      profile: this.#gate.profile,
+      task: this.#gate.task,
+      signal: controller.signal,
+    });
 
     try {
       for await (const event of this.#session.send(text, controller.signal)) {
@@ -581,6 +646,8 @@ export class PolarisApp {
     } finally {
       this.#turnActivity = null;
       stopSealing();
+      stopSealingAgents();
+      this.#agents.endTurn(MAIN_AGENT);
       this.#verifier.cancelRunning();
       await this.#observe('polaris');
       this.#turn = null;
@@ -687,6 +754,146 @@ export class PolarisApp {
     this.#emit();
   }
 
+  /** The agents Polaris can run, and the runs going now. */
+  get agents(): AgentManager {
+    return this.#agents;
+  }
+
+  /**
+   * `/agent <name> <task>`: the user runs an agent by hand, through exactly
+   * the path a delegation takes. Its result is for the user to read; it is
+   * not given to the main agent, whose conversation stays as it was.
+   */
+  async runAgent(name: string, task: string): Promise<DelegationResult> {
+    this.#idle();
+    const controller = new AbortController();
+    this.#turn = controller;
+    this.#set('delegating');
+    try {
+      await this.#observe('user');
+      return await this.#agents.run(name, task, {
+        runId: USER,
+        depth: 0,
+        objective: task,
+        profile: this.#gate.profile,
+        task: authorizeTask(task, null),
+        signal: controller.signal,
+      });
+    } finally {
+      this.#turn = null;
+      this.#set(controller.signal.aborted ? 'cancelled' : 'ready');
+    }
+  }
+
+  /**
+   * An agent's work, as the user sees it: one row for the agent, its tool
+   * calls nested under it, a live activity under the turn that is waiting on
+   * it. Its words are not shown — they are the result the parent reads.
+   */
+  #onAgentEvent(event: AgentEvent): void {
+    const { run } = event;
+    if (event.type === 'run-start') {
+      const parent = run.parentRunId === MAIN_AGENT ? this.#turnActivity : null;
+      const activity = this.#activity.start('agent', run.agent, {
+        state: 'waiting-model',
+        ownerId: run.id,
+        ...(parent ? { parentId: parent } : {}),
+      });
+      // The turn is waiting on the agent now, not on its model.
+      this.#activity.touch(parent, 'waiting-agent');
+      const entry = this.#appendTool({
+        type: 'tool-start',
+        id: run.id,
+        name: run.agent,
+        target: run.task,
+      });
+      this.#agentRuns.set(run.id, { activity, entry, parent, tools: new Map() });
+      this.#set('delegating');
+      return;
+    }
+    const state = this.#agentRuns.get(run.id);
+    if (!state) return;
+
+    if (event.type === 'run-activity') {
+      this.#activity.touch(
+        state.activity,
+        event.waiting === 'model'
+          ? 'waiting-model'
+          : event.waiting === 'runtime'
+            ? 'waiting-runtime'
+            : undefined,
+      );
+      return;
+    }
+
+    if (event.type === 'run-event') {
+      const change = event.event;
+      switch (change.type) {
+        case 'text-delta':
+          this.#activity.touch(state.activity, 'streaming');
+          break;
+        case 'tool-start': {
+          if (change.paths) void this.#capture(change.paths);
+          const entry = this.#appendTool(change, 1);
+          const activity = this.#activity.start(
+            change.name === 'Run' ? 'command' : 'tool',
+            change.target,
+            { state: 'running', parentId: state.activity, ownerId: run.id, tool: change.name },
+          );
+          state.tools.set(change.id, { entry, name: change.name, activity });
+          this.#activity.touch(state.activity, 'waiting-tool');
+          break;
+        }
+        case 'tool-output-delta':
+          this.#activity.output(state.tools.get(change.id)?.activity, change.text);
+          break;
+        case 'tool-result':
+        case 'tool-error':
+          this.#finishTool(state.tools, change);
+          this.#activity.touch(
+            state.activity,
+            state.tools.size > 0 ? 'waiting-tool' : 'waiting-model',
+          );
+          break;
+      }
+      return;
+    }
+
+    // run-end: anything the agent left running never finished.
+    for (const call of state.tools.values()) {
+      this.#activity.finish(call.activity, 'cancelled');
+      this.#update(call.entry, (message) => ({ ...message, state: 'cancelled' }));
+    }
+    const { result } = event;
+    const ended = this.#activity.finish(
+      state.activity,
+      result.status === 'cancelled'
+        ? 'cancelled'
+        : result.status === 'failed'
+          ? 'failed'
+          : 'completed',
+    );
+    const duration = ended?.endedAt === undefined ? undefined : ended.endedAt - ended.startedAt;
+    this.#update(state.entry, (message) => ({
+      ...message,
+      state:
+        result.status === 'cancelled'
+          ? 'cancelled'
+          : result.status === 'failed'
+            ? 'error'
+            : 'complete',
+      tool: {
+        ...(message.tool as ToolCall),
+        detail: resultLine(result),
+        ...(duration === undefined ? {} : { duration }),
+      },
+    }));
+    this.#agentRuns.delete(run.id);
+    // Back to the parent, which now reads the result.
+    this.#activity.touch(state.parent, 'waiting-model');
+    if (state.parent) this.#set('thinking');
+  }
+
   /** A few lines for the terminal after exit, or null when Polaris changed nothing. */
   exitSummary(): string | null {
     const changes = this.#tracker?.changes() ?? [];
@@ -730,13 +937,14 @@ export class PolarisApp {
     return this.#tracker;
   }
 
-  #appendTool(event: Extract<ModelEvent, { type: 'tool-start' }>): string {
+  #appendTool(event: Extract<ModelEvent, { type: 'tool-start' }>, depth = 0): string {
     const message: UiMessage = {
       id: `m${this.#nextId++}`,
       role: 'tool',
       text: '',
       state: 'streaming',
       tool: { name: event.name, target: event.target },
+      ...(depth > 0 ? { depth } : {}),
     };
     this.#messages = [...this.#messages, message];
     this.#emit();
@@ -872,15 +1080,12 @@ export class PolarisApp {
    * switch leaves the working session untouched.
    */
   async #swap(config: PolarisConfig, what: string, notice?: string): Promise<void> {
+    // A turn — and any agent it is waiting on — belongs to the session being
+    // replaced: it is finished or cancelled first, never orphaned.
+    this.#idle();
     const previous = this.#session;
     this.#set('switching');
-    const next = new Session({
-      cwd: this.cwd,
-      config,
-      gate: this.#gate,
-      context: this.#context,
-      activity: this.#runtimeActivity,
-    });
+    const next = this.#newSession(config);
     try {
       await next.start();
     } catch (error) {

@@ -55,6 +55,7 @@ function Row({ line, spinner }: { line: TranscriptLine; spinner: string }) {
             : palette.muted;
       return (
         <Box width="100%">
+          {line.indent ? <Text>{'  '.repeat(line.indent)}</Text> : null}
           <Text color={iconColor}>{`${running ? spinner : TOOL_ICON[line.state]} `}</Text>
           <Text color={running ? palette.muted : palette.text} bold>
             {line.label}
@@ -69,7 +70,7 @@ function Row({ line, spinner }: { line: TranscriptLine; spinner: string }) {
     case 'detail':
       return (
         <Text color={line.state === 'error' ? palette.error : palette.subtle}>
-          {`  ${line.text}`}
+          {`${'  '.repeat(line.indent ?? 0)}  ${line.text}`}
         </Text>
       );
 

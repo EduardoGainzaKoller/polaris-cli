@@ -1,5 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import {
+  DELEGATE_TASK,
+  DELEGATE_TASK_DESCRIPTION,
+  DELEGATE_TASK_SCHEMA,
   LOAD_SKILL,
   LOAD_SKILL_DESCRIPTION,
   READ_REFERENCE_DESCRIPTION,
@@ -97,6 +100,12 @@ const SKILL_TOOLS: Anthropic.Tool[] = [
   },
 ];
 
+const DELEGATE_TOOL: Anthropic.Tool = {
+  name: DELEGATE_TASK,
+  description: DELEGATE_TASK_DESCRIPTION,
+  input_schema: { ...DELEGATE_TASK_SCHEMA, required: [...DELEGATE_TASK_SCHEMA.required] },
+};
+
 /**
  * Polaris owns the agent loop here, because the Messages API is stateless:
  * stream a response, run the tools it asks for, send the results back, repeat.
@@ -118,7 +127,9 @@ export const anthropicApiProvider: ModelProvider = {
     }
 
     const model = options.model ?? DEFAULT_MODEL;
-    const registry = createRegistry(options.permissions, options.gate);
+    // An agent's session is a conversation of its own, built the same way:
+    // its instructions, its context and only the tools within its ceiling.
+    const registry = createRegistry(options.permissions, options.gate, options.capabilities);
     const prompt = systemPrompt(options.permissions);
     const usage = new UsageTracker();
     const context = options.context;
@@ -131,6 +142,8 @@ export const anthropicApiProvider: ModelProvider = {
       // Not workspace tools: they ask Polaris's context manager for a skill,
       // which is why they never reach the registry or the permission gate.
       ...(context?.hasSkills ? SKILL_TOOLS : []),
+      // Orchestration, not a workspace tool: only the main agent has it.
+      ...(context?.canDelegate ? [DELEGATE_TOOL] : []),
     ];
     // Rendered for every request, so a skill loaded mid-turn, a reloaded
     // POLARIS.md or an unloaded skill is what the very next request sees.
@@ -143,7 +156,7 @@ export const anthropicApiProvider: ModelProvider = {
 
     return {
       model,
-      access: polarisAccess(options.permissions),
+      access: polarisAccess(options.permissions, options.capabilities),
       liveInstructions: true,
       get effort() {
         return effort;
@@ -225,6 +238,17 @@ export const anthropicApiProvider: ModelProvider = {
                         String(input.skill ?? ''),
                         String(input.path ?? ''),
                       );
+                results.push({ text: reply.text, error: !reply.ok });
+                continue;
+              }
+              // The agent's run is shown by Polaris as it happens; what comes
+              // back here is its result, and nothing else of it.
+              if (context && call.name === DELEGATE_TASK) {
+                const input = (call.input ?? {}) as Record<string, unknown>;
+                const reply = await context.delegate(
+                  String(input.agent ?? ''),
+                  String(input.task ?? ''),
+                );
                 results.push({ text: reply.text, error: !reply.ok });
                 continue;
               }

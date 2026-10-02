@@ -1,7 +1,7 @@
 import type { SessionContext } from '../context/manager.ts';
 import type { UsageReport } from '../core/usage.ts';
 import type { PermissionGate } from '../permissions/gate.ts';
-import type { PermissionProfile } from '../permissions/policy.ts';
+import type { Capability, PermissionProfile } from '../permissions/policy.ts';
 
 /**
  * The only contract the CLI core knows about. Concrete providers
@@ -37,6 +37,12 @@ export interface ProviderSessionOptions {
    * never a message sent to the model just to see if it answers.
    */
   readonly activity?: RuntimeActivity;
+  /**
+   * The most this session may do, for an agent's session: tools outside it do
+   * not exist, whatever the profile would offer. Absent means the profile alone
+   * decides, as for the main agent.
+   */
+  readonly capabilities?: readonly Capability[];
 }
 
 export interface RuntimeActivity {
@@ -157,6 +163,15 @@ export interface ModelSession {
    * than returning zeroes that look like real measurements.
    */
   usage?(): Promise<UsageReport | null>;
+  /**
+   * A new, independent conversation on this session's runtime, for an agent:
+   * nothing of this conversation is carried over. Optional — a provider whose
+   * sessions are cheap to create leaves it out and Polaris calls
+   * `createSession` instead; one that runs a process per session (Codex)
+   * offers it so an agent does not start a second one. Closing the child
+   * releases only the child.
+   */
+  createChild?(options: ProviderSessionOptions): Promise<ModelSession>;
   close(): Promise<void>;
 }
 

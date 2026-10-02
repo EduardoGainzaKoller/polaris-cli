@@ -35,15 +35,24 @@ const CAPABILITIES: Record<string, Capability> = {
  */
 export const DENIED_TOOLS = ['MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task'];
 
-/** The runtime tools a profile makes available. */
-export function toolsFor(profile: PermissionProfile): string[] {
+/** The runtime tools a profile makes available, within an agent's ceiling when there is one. */
+export function toolsFor(
+  profile: PermissionProfile,
+  capabilities?: readonly Capability[],
+): string[] {
   return Object.entries(CAPABILITIES)
-    .filter(([, capability]) => isAvailable(profile, capability))
+    .filter(
+      ([, capability]) =>
+        isAvailable(profile, capability) && (!capabilities || capabilities.includes(capability)),
+    )
     .map(([name]) => name);
 }
 
-export function claudeAccess(profile: PermissionProfile): ToolAccess {
-  return { mode: profile, runtime: 'Claude runtime', tools: toolsFor(profile) };
+export function claudeAccess(
+  profile: PermissionProfile,
+  capabilities?: readonly Capability[],
+): ToolAccess {
+  return { mode: profile, runtime: 'Claude runtime', tools: toolsFor(profile, capabilities) };
 }
 
 /**
@@ -55,15 +64,18 @@ export function claudeAccess(profile: PermissionProfile): ToolAccess {
  * workspace-write, so the user is asked exactly as often as the profile says.
  */
 /**
- * Polaris's skill tools, as the runtime names them: the in-process MCP server
- * `polaris` serving `load_skill` and `read_skill_reference`. They read skills
- * through Polaris's context manager, never the workspace, so they need no
- * approval and no boundary check — and they are all the MCP there is.
+ * Polaris's own tools, as the runtime names them: the in-process MCP server
+ * `polaris` serving `load_skill`, `read_skill_reference` and — for the main
+ * agent — `delegate_task`. They go to Polaris's context manager and agent
+ * manager, never the workspace, so they need no approval and no boundary
+ * check here (an agent's session meets its own gate) — and they are all the
+ * MCP there is.
  */
 export const SKILL_SERVER = 'polaris';
 export const SKILL_TOOL_NAMES = [
   `mcp__${SKILL_SERVER}__load_skill`,
   `mcp__${SKILL_SERVER}__read_skill_reference`,
+  `mcp__${SKILL_SERVER}__delegate_task`,
 ] as const;
 
 function isSkillTool(name: string): boolean {
@@ -220,8 +232,9 @@ export function workspaceGuard(
   profile: PermissionProfile,
   gate?: PermissionGate,
   decisions: ClaudeDecisions = new Map(),
+  capabilities?: readonly Capability[],
 ): HookCallback {
-  const allowed = toolsFor(profile);
+  const allowed = toolsFor(profile, capabilities);
   return async (input, toolUseID, options) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
 

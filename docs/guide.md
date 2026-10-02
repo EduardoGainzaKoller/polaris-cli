@@ -459,6 +459,79 @@ Loaded skills last for the conversation. `/new` clears them and keeps `POLARIS.m
 and `/skill unload` apply to the next message; the Claude and Codex runtimes fix them when
 the session starts, so there both start a new conversation — and Polaris says so.
 
+## Agents
+
+The agent you talk to is the **main agent**. Since v0.9 it can hand one focused task to
+another agent, which works in a context of its own and returns only its conclusions:
+
+```text
+❯ Analiza cómo implementar refresh tokens en este proyecto.
+
+◌ repository-explorer                                       00:14
+    ✓ Grep "Authentication"                                  0.3s
+    ✓ Read src/auth/SecurityConfig.java                      0.1s
+    ◌ Read src/auth/TokenService.java
+✓ repository-explorer                                        16.2s
+  7 files inspected · 4 findings
+```
+
+There is one agent today, built in:
+
+**`repository-explorer`** — explores the repository to answer a focused architectural or
+implementation question, and returns a structured result: a summary, the relevant files,
+findings (each marked *observed* in a file, with path and lines when useful, or
+*inferred*), and open questions.
+
+How delegation works:
+
+- **The main agent decides.** It sees each agent's name and description — never its
+  instructions — and calls `delegate_task` when an isolated exploration materially
+  helps: how a feature is built across the codebase, which components a change would
+  touch. It is told not to delegate trivial reads or anything it can answer directly.
+- **Context isolation.** The agent starts clean. It receives its own instructions, the
+  project's `POLARIS.md`, the skill catalog, the user's current request (as context) and
+  the delegated task. It does **not** receive the main conversation, its tool results or
+  the skills the main agent loaded; a skill the agent loads stays in its run.
+- **Only the result comes back.** Everything the agent read stays in its context; the main
+  agent receives the result, capped at 8,000 characters (a cut says so), and continues.
+  The transcript shows the agent's tool calls, nested under it, but not its prose.
+- **Read-only, enforced in code.** The agent's capabilities are the intersection of the
+  hard constraints, its own definition (read only), the current profile and what the
+  user's request authorised. An agent never widens anything: under `smart` or
+  `workspace-write` the explorer is still read-only. Anything outside its ceiling — Write,
+  Edit, a command, a path outside the workspace — is **denied, never asked**: an agent
+  puts no approval in front of you. If the workspace changes during a read-only run
+  anyway, the run fails as a policy violation and the change shows up in `/diff`.
+- **Limits.** Agents cannot delegate (depth 1); one agent at a time; at most three
+  delegations per request, and the same task once; an agent run stops after 40 tool calls
+  or 5 minutes and returns what it has as *partial*. Silence is shown, never acted on.
+- **Status is never hidden.** A result is `completed`, `partial`, `failed` or `cancelled`,
+  and the main agent is told which. A failed agent does not end the turn.
+- **Cancellation.** Ctrl+C during a delegation cancels the agent, its running tool and the
+  turn; its session is closed and the main session stays usable. `/new`, `/provider`,
+  `/model` and `/permissions` wait for the turn to end or be cancelled.
+
+Each runtime gets the same semantics through its own mechanism, and Polaris's definition
+is the source of truth:
+
+| Provider | The agent runs as |
+| --- | --- |
+| `anthropic-api` | a new Messages API conversation with only Read, Glob and Grep |
+| `claude` | a separate Agent SDK query with only Read, Glob and Grep; the runtime's own subagents stay disabled and `.claude/agents` is never read |
+| `codex` | a new, ephemeral thread on the same App Server (never `thread/fork`), in Codex's read-only sandbox with approvals off; Codex's own subagents (`multi_agent`) are disabled on Polaris threads |
+| `mock` | an offline scripted run, for tests |
+
+On Codex the explorer reads and searches through Codex's own shell, inside that
+read-only sandbox — some of those calls appear as `Run`. They can read; they cannot write.
+
+Run an agent yourself with `/agent repository-explorer <task>`: it goes through exactly the
+same path and prints the full result to you, but **does not add it to the main
+conversation** — it is an inspection tool. `/agents` lists the agents and what they may
+do.
+
+Custom agents, agents with their own provider or model, and agents that change files are
+not part of v0.9.
+
 ## Execution feedback
 
 A long operation never shows only a spinner. Above the input, Polaris shows what is
@@ -513,6 +586,8 @@ the current activity.
 | `/context [show\|reload]` | The POLARIS.md files in use, their content, or re-read them |
 | `/skills [reload]` | Skills available, with scope, source and whether loaded; `reload` rediscovers |
 | `/skill <name>` | Load a skill into this conversation (`/skill unload <name>` to drop it) |
+| `/agents` | The agents Polaris can delegate to, with their tools and permissions |
+| `/agent <name> <task>` | Run an agent yourself; its result is shown to you, not given to the main agent |
 | `/clear` | Clear the transcript (the provider keeps its conversation) |
 | `/exit` | Exit Polaris (`exit`, `quit`, `/q` also work) |
 
@@ -587,6 +662,10 @@ src/
     codex/             Codex App Server (JSON-RPC over stdio)
       app-server.ts    the process + protocol seam; tests replace it wholesale
   tools/               file and command tools, the workspace boundary and every limit
+  agents/
+    registry.ts        AgentDefinition and AgentRegistry (repository-explorer)
+    manager.ts         AgentManager: runs, isolation, limits, cancellation, cleanup
+    result.ts          DelegationResult: the contract, validation, rendering
   context/
     project.ts         POLARIS.md, from the workspace up to the Git root
     skills.ts          SkillRegistry: discovery, SKILL.md parsing, references

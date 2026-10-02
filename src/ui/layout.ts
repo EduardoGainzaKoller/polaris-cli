@@ -13,6 +13,8 @@ export interface TranscriptLine {
   readonly label?: string;
   /** Short outcome shown at the right edge of a tool row. */
   readonly aside?: string;
+  /** Nesting levels: an agent's tool calls sit one level under the agent. */
+  readonly indent?: number;
 }
 
 /** Wraps on word boundaries, keeps explicit newlines, never loses characters. */
@@ -69,6 +71,9 @@ export function transcriptLines(messages: readonly UiMessage[], width: number): 
 
     if (role === 'tool' && message.tool) {
       const { name, target, detail, denied, duration, lastOutput } = message.tool;
+      const depth = message.depth ?? 0;
+      const nest = depth > 0 ? { indent: depth } : {};
+      const inner = width - depth * 2;
       const cancelled = detail?.startsWith('cancelled') ? detail : 'cancelled';
       const outcome = denied ? 'denied' : state === 'cancelled' ? cancelled : detail;
       // A short success fits beside the row, with how long it took; errors
@@ -76,7 +81,7 @@ export function transcriptLines(messages: readonly UiMessage[], width: number): 
       const short = state === 'complete' && outcome && outcome.length <= 24 ? outcome : undefined;
       const timing = duration !== undefined && state !== 'cancelled' ? took(duration) : undefined;
       const beside = [short, timing].filter(Boolean).join(' · ') || undefined;
-      const room = Math.max(8, width - name.length - 4 - (beside ? beside.length + 2 : 0));
+      const room = Math.max(8, inner - name.length - 4 - (beside ? beside.length + 2 : 0));
       const [first = '', ...rest] = wrapText(target, room);
       push({
         kind: 'tool',
@@ -85,16 +90,23 @@ export function transcriptLines(messages: readonly UiMessage[], width: number): 
         label: name,
         text: first,
         ...(beside ? { aside: beside } : {}),
+        ...nest,
       });
-      for (const text of rest) push({ kind: 'detail', role, state, text });
+      for (const text of rest) push({ kind: 'detail', role, state, text, ...nest });
       // A command's last line says how it ended — BUILD SUCCESSFUL — more
       // plainly than its exit code does.
       if (lastOutput && lastOutput !== outcome) {
-        push({ kind: 'detail', role, state, text: lastOutput.slice(0, Math.max(8, width - 4)) });
+        push({
+          kind: 'detail',
+          role,
+          state,
+          text: lastOutput.slice(0, Math.max(8, inner - 4)),
+          ...nest,
+        });
       }
       if (outcome && !short) {
-        for (const text of wrapText(outcome, Math.max(8, width - 4))) {
-          push({ kind: 'detail', role, state, text });
+        for (const text of wrapText(outcome, Math.max(8, inner - 4))) {
+          push({ kind: 'detail', role, state, text, ...nest });
         }
       }
       continue;
@@ -150,6 +162,7 @@ const STATUS_LABELS: Record<AppStatus, string> = {
   running: 'running command',
   switching: 'switching',
   approving: 'approval required',
+  delegating: 'agent working',
   cancelled: 'cancelled',
   error: 'error',
 };

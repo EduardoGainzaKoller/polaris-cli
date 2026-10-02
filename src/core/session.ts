@@ -1,5 +1,6 @@
+import type { ChildSpec } from '../agents/manager.ts';
 import type { PolarisConfig } from '../config/config.ts';
-import type { ContextManager } from '../context/manager.ts';
+import type { ContextManager, DelegationPort } from '../context/manager.ts';
 import type { PermissionGate } from '../permissions/gate.ts';
 import { DEFAULT_PROFILE, type PermissionProfile } from '../permissions/policy.ts';
 import type { RuntimeActivity } from '../providers/provider.ts';
@@ -7,6 +8,7 @@ import {
   getProvider,
   type ModelEvent,
   type ModelSession,
+  type ProviderSessionOptions,
   type ToolAccess,
 } from '../providers/provider.ts';
 import { PolarisError } from './errors.ts';
@@ -28,6 +30,8 @@ export interface SessionOptions {
   /** Project instructions and skills; each session gets its own view of them. */
   readonly context?: ContextManager;
   readonly activity?: RuntimeActivity;
+  /** How the main agent hands tasks to agents; absent, it cannot. */
+  readonly delegation?: DelegationPort;
 }
 
 /**
@@ -45,6 +49,7 @@ export class Session {
   readonly #gate: PermissionGate;
   readonly #context: ContextManager | undefined;
   readonly #activity: RuntimeActivity | undefined;
+  readonly #delegation: DelegationPort | undefined;
 
   constructor(options: SessionOptions) {
     this.cwd = options.cwd;
@@ -52,6 +57,7 @@ export class Session {
     this.#gate = options.gate;
     this.#context = options.context;
     this.#activity = options.activity;
+    this.#delegation = options.delegation;
   }
 
   /** See `ModelSession.liveInstructions`. */
@@ -101,7 +107,13 @@ export class Session {
       cwd: this.cwd,
       permissions: this.permissions,
       gate: this.#gate,
-      ...(this.#context ? { context: this.#context.session() } : {}),
+      ...(this.#context
+        ? {
+            context: this.#context.session(
+              this.#delegation ? { delegation: this.#delegation } : {},
+            ),
+          }
+        : {}),
       ...(this.#activity ? { activity: this.#activity } : {}),
       ...(this.config.model ? { model: this.config.model } : {}),
       ...(this.config.effort ? { effort: this.config.effort } : {}),
@@ -128,6 +140,32 @@ export class Session {
     } finally {
       if (answer.length > 0) this.#history.push({ role: 'assistant', text: answer });
     }
+  }
+
+  /**
+   * An agent's session: the same provider, model and effort as this one, and
+   * a conversation of its own. A runtime that can host it beside this session
+   * (a Codex thread on the same App Server) does; otherwise the provider
+   * starts a new session. Either way the child is the caller's to close, and
+   * closing it leaves this session running.
+   */
+  async spawnChild(spec: ChildSpec): Promise<ModelSession> {
+    const provider = getProvider(this.config.provider);
+    if (!this.#model || !provider) throw new PolarisError('Session is not started');
+    const effort = this.#model.effort;
+    const options: ProviderSessionOptions = {
+      cwd: this.cwd,
+      permissions: spec.permissions,
+      gate: spec.gate,
+      context: spec.context,
+      activity: spec.activity,
+      capabilities: spec.capabilities,
+      ...(this.config.model ? { model: this.config.model } : {}),
+      ...(effort ? { effort } : {}),
+    };
+    return this.#model.createChild
+      ? this.#model.createChild(options)
+      : provider.createSession(options);
   }
 
   /** null when this provider cannot report consumption. */

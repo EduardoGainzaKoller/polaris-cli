@@ -1,8 +1,12 @@
 import {
+  DELEGATE_TASK,
+  DELEGATE_TASK_DESCRIPTION,
+  DELEGATE_TASK_SCHEMA,
   LOAD_SKILL,
   LOAD_SKILL_DESCRIPTION,
   READ_REFERENCE_DESCRIPTION,
   READ_SKILL_REFERENCE,
+  type SessionContext,
 } from '../../context/manager.ts';
 import { PolarisError } from '../../core/errors.ts';
 import { debug } from '../../core/logger.ts';
@@ -26,9 +30,13 @@ import { buildReport, type RateLimitsResponse, toTokens } from './usage.ts';
  * chooses which sandbox and which approval policy from the active profile —
  * never `danger-full-access` — and lets Codex enforce it. Web search is turned
  * off explicitly, whatever the user's Codex config says, because v0.6 has no
- * network capability.
+ * network capability. So are Codex's own subagents (`multi_agent`): agents
+ * are Polaris's, defined, limited and isolated by Polaris — a thread Codex
+ * spawned on its own would have no gate Polaris could route it to.
  */
-const THREAD_DEFAULTS = { config: { web_search: 'disabled' } } as const;
+const THREAD_DEFAULTS = {
+  config: { web_search: 'disabled', 'features.multi_agent': false },
+} as const;
 
 /**
  * Codex streams far more than Polaris renders. Agent text and tool-like items
@@ -38,64 +46,181 @@ const THREAD_DEFAULTS = { config: { web_search: 'disabled' } } as const;
  */
 const RENDERED = 'item/agentMessage/delta';
 
+/** One conversation on the App Server: the main agent's thread, or an agent's. */
+interface ThreadHost {
+  readonly options: ProviderSessionOptions;
+  readonly turns: TurnRouter;
+}
+
+interface StartedThread {
+  readonly id: string;
+  readonly model: string;
+  readonly effort: string | undefined;
+}
+
 export function createCodexProvider(connect: Connect = connectToAppServer): ModelProvider {
   return {
     id: 'codex',
     supports: PERMISSION_PROFILES,
     async createSession(options: ProviderSessionOptions): Promise<ModelSession> {
       const connection = await connect();
-      const turns = new TurnRouter(options.cwd);
-      connection.onNotification((method, params) => {
-        // Any notification is the runtime being alive: reasoning, plans, token
-        // counts — none of them rendered, all of them real.
-        options.activity?.pulse();
-        if (method === 'thread/tokenUsage/updated') tokens = toTokens(params) ?? tokens;
-        else if (method === 'account/rateLimits/updated') {
-          rateLimits = (params as RateLimitsResponse).rateLimits ?? rateLimits;
-        }
-        turns.handle(method, params);
-      });
-      const context = options.context;
-      connection.onRequest(async (method, params) => {
-        // A model asking for a skill: answered by Polaris's context manager.
-        if (method === 'item/tool/call') {
-          const reply = context
-            ? await answerSkillCall(context, params)
-            : { ok: false, text: 'No such tool.' };
-          return { contentItems: [{ type: 'inputText', text: reply.text }], success: reply.ok };
-        }
-        const card = toCard(method, params, (itemId) => turns.changesOf(itemId), options.cwd);
-        if (!card) {
-          // Anything Polaris cannot present is refused rather than guessed at:
-          // a silent yes to an unknown request is the worst possible default.
-          debug('codex', 'declining unsupported request', method);
-          return toDecision(method, false);
-        }
-        const { operation, ...request } = card;
-        const verdict = await options.gate.authorize(operation, request);
-        return toDecision(method, verdict.allowed);
-      });
-      connection.onClose((error) => turns.abortAll(error));
+      // Every thread on this connection, by id. Notifications and requests
+      // name their thread, so an agent's thread and the main one never mix:
+      // an approval is put to the right gate, a delta reaches the right turn.
+      const hosts = new Map<string, ThreadHost>();
+      let mainId: string | null = null;
+      /** The thread a message is about; a message naming no thread is the session's. */
+      const hostOf = (params: JsonObject): ThreadHost | undefined => {
+        if (typeof params.threadId === 'string') return hosts.get(params.threadId);
+        return mainId ? hosts.get(mainId) : undefined;
+      };
 
-      let threadId: string;
-      let model: string;
-      // Sent with every turn once chosen: Codex takes effort per turn, so a
-      // change never needs a new thread.
-      let effort: string | undefined = options.effort;
       // Both halves of the usage picture arrive unprompted: the thread pushes
       // its token totals, and the account pushes rate limits when they move.
       // Keeping the latest of each means /status can answer instantly and
-      // still refresh from the server when it can.
+      // still refresh from the server when it can. Tokens are the main
+      // thread's: an agent's thread is accounted by Codex, not shown here.
       let tokens: ReturnType<typeof toTokens> = null;
       let rateLimits: RateLimitsResponse['rateLimits'] = null;
+
+      connection.onNotification((method, params) => {
+        if (method === 'account/rateLimits/updated') {
+          rateLimits = (params as RateLimitsResponse).rateLimits ?? rateLimits;
+        }
+        const host = hostOf(params);
+        // Any notification is the runtime being alive: reasoning, plans, token
+        // counts — none of them rendered, all of them real.
+        (host?.options.activity ?? options.activity)?.pulse();
+        if (!host) return;
+        if (method === 'thread/tokenUsage/updated' && host === hosts.get(mainId ?? '')) {
+          tokens = toTokens(params) ?? tokens;
+        }
+        host.turns.handle(method, params);
+      });
+      connection.onRequest(async (method, params) => {
+        const host = hostOf(params);
+        // A model asking for a skill or an agent: answered by Polaris.
+        if (method === 'item/tool/call') {
+          const context = host?.options.context;
+          const reply = context
+            ? await answerToolCall(context, params)
+            : { ok: false, text: 'No such tool.' };
+          return { contentItems: [{ type: 'inputText', text: reply.text }], success: reply.ok };
+        }
+        const card = host
+          ? toCard(method, params, (itemId) => host.turns.changesOf(itemId), host.options.cwd)
+          : null;
+        if (!host || !card) {
+          // Anything Polaris cannot present is refused rather than guessed at:
+          // a silent yes to an unknown request is the worst possible default.
+          debug(
+            'codex',
+            'declining',
+            host ? 'unsupported request' : 'request from a thread Polaris did not start',
+            method,
+            String(params.threadId),
+            [...hosts.keys()].join(','),
+          );
+          return toDecision(method, false);
+        }
+        const { operation, ...request } = card;
+        // Each thread's own gate: an agent's refuses what its ceiling excludes.
+        const verdict = await host.options.gate.authorize(operation, request);
+        return toDecision(method, verdict.allowed);
+      });
+      connection.onClose((error) => {
+        for (const host of hosts.values()) host.turns.abortAll(error);
+      });
+
+      // Registering Polaris's own tools on a thread (`dynamicTools`) is an
+      // experimental App Server field; opted into only when there is
+      // something to offer: skills to load, or agents to delegate to.
+      const wantsTools =
+        options.context?.hasSkills === true || options.context?.canDelegate === true;
+      let dynamicTools = wantsTools;
+      let requirements: ConfigRequirementsResponse['requirements'] = null;
+
+      /**
+       * An administrator can restrict which sandboxes and approval policies
+       * this install may use. Polaris asks first and reports the restriction
+       * instead of trying a value it is not allowed to set — for an agent's
+       * thread as for the main one.
+       */
+      const policyFor = (profile: ProviderSessionOptions['permissions']) => {
+        const policy = threadPolicy(profile);
+        const allowedSandboxes = requirements?.allowedSandboxModes ?? null;
+        if (allowedSandboxes && !allowedSandboxes.includes(policy.sandbox)) {
+          throw adminRestricted('sandbox', policy.sandbox, allowedSandboxes);
+        }
+        const allowedPolicies = requirements?.allowedApprovalPolicies ?? null;
+        if (allowedPolicies && !allowedPolicies.includes(policy.approvalPolicy)) {
+          throw adminRestricted('approval policy', policy.approvalPolicy, allowedPolicies);
+        }
+        return policy;
+      };
+
+      /**
+       * A new thread with exactly the context Polaris gives it. Codex keeps
+       * its own system prompt; Polaris adds how to finish, and the project's
+       * context — or an agent's role and context — as developer instructions.
+       * Never `thread/fork`: a fork copies the conversation, and an agent's
+       * thread must start with nothing of it.
+       */
+      const startThread = async (
+        thread: ProviderSessionOptions,
+        extra: { ephemeral?: boolean; model?: string } = {},
+      ): Promise<StartedThread> => {
+        const policy = policyFor(thread.permissions);
+        const context = thread.context;
+        const start = (canLoad: boolean) => {
+          const developerInstructions = [
+            thread.permissions === 'read-only' ? '' : `${AUTONOMY_GUIDANCE} ${COMPLETION_GUIDANCE}`,
+            context?.instructions({ canLoad }) ?? '',
+          ]
+            .filter(Boolean)
+            .join('\n\n');
+          const tools = canLoad && context ? polarisTools(context) : [];
+          const model = extra.model ?? thread.model;
+          return connection.request<ThreadStartResponse>('thread/start', {
+            cwd: thread.cwd,
+            ...THREAD_DEFAULTS,
+            ...policy,
+            ...(developerInstructions ? { developerInstructions } : {}),
+            ...(tools.length > 0 ? { dynamicTools: tools } : {}),
+            ...(model ? { model } : {}),
+            // An agent's thread is one-shot: nothing of it is kept on disk.
+            ...(extra.ephemeral ? { ephemeral: true } : {}),
+          });
+        };
+        const canLoad =
+          dynamicTools && (context?.hasSkills === true || context?.canDelegate === true);
+        let started: ThreadStartResponse;
+        try {
+          started = await start(canLoad);
+        } catch (error) {
+          if (!canLoad) throw error;
+          // A Codex without the experimental field still gets the context;
+          // skills are then loaded by the user with /skill, the catalog says
+          // so, and the main agent works without agents.
+          debug('codex', 'dynamic tools refused, no model-loaded skills or delegation', error);
+          dynamicTools = false;
+          started = await start(false);
+        }
+        return {
+          id: started.thread.id,
+          // The runtime reports the model it actually resolved; Polaris never
+          // invents one.
+          model: started.model,
+          effort: started.reasoningEffort ?? undefined,
+        };
+      };
+
+      let main: StartedThread;
       try {
         await connection.request('initialize', {
           // Honest identification: Polaris is Polaris, not another client.
           clientInfo: { name: 'polaris', title: 'Polaris', version: VERSION },
-          // Registering Polaris's skill tools on a thread (`dynamicTools`) is
-          // an experimental App Server field; opted into only when there are
-          // skills to load.
-          ...(context?.hasSkills ? { capabilities: { experimentalApi: true } } : {}),
+          ...(wantsTools ? { capabilities: { experimentalApi: true } } : {}),
         });
         connection.notify('initialized', {});
 
@@ -109,59 +234,12 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
         if (!auth?.authMethod) throw notAuthenticated();
         debug('codex', 'authenticated via', auth.authMethod);
 
-        // An administrator can restrict which sandboxes and approval policies
-        // this install may use. Polaris asks first and reports the restriction
-        // instead of trying a value it is not allowed to set.
-        const policy = threadPolicy(options.permissions);
-        const requirements = (
-          await connection.request<ConfigRequirementsResponse>('configRequirements/read', {})
-        )?.requirements;
-        const allowedSandboxes = requirements?.allowedSandboxModes ?? null;
-        if (allowedSandboxes && !allowedSandboxes.includes(policy.sandbox)) {
-          throw adminRestricted('sandbox', policy.sandbox, allowedSandboxes);
-        }
-        const allowedPolicies = requirements?.allowedApprovalPolicies ?? null;
-        if (allowedPolicies && !allowedPolicies.includes(policy.approvalPolicy)) {
-          throw adminRestricted('approval policy', policy.approvalPolicy, allowedPolicies);
-        }
-
-        // Codex keeps its own system prompt; Polaris adds how to finish, and
-        // the project's context, as developer instructions.
-        const startThread = (canLoad: boolean) => {
-          const developerInstructions = [
-            options.permissions === 'read-only'
-              ? ''
-              : `${AUTONOMY_GUIDANCE} ${COMPLETION_GUIDANCE}`,
-            context?.instructions({ canLoad }) ?? '',
-          ]
-            .filter(Boolean)
-            .join('\n\n');
-          return connection.request<ThreadStartResponse>('thread/start', {
-            cwd: options.cwd,
-            ...THREAD_DEFAULTS,
-            ...policy,
-            ...(developerInstructions ? { developerInstructions } : {}),
-            ...(canLoad ? { dynamicTools: SKILL_TOOLS } : {}),
-            ...(options.model ? { model: options.model } : {}),
-          });
-        };
-        let thread: ThreadStartResponse;
-        try {
-          thread = await startThread(context?.hasSkills === true);
-        } catch (error) {
-          if (!context?.hasSkills) throw error;
-          // A Codex without the experimental field still gets the context;
-          // skills are then loaded by the user with /skill, and the catalog
-          // tells the model so.
-          debug('codex', 'dynamic tools refused, skills are user-loaded only', error);
-          thread = await startThread(false);
-        }
-        threadId = thread.thread.id;
-        // The runtime reports the model it actually resolved; Polaris never
-        // invents one.
-        model = thread.model;
-        effort ??= thread.reasoningEffort ?? undefined;
-        debug('codex', 'thread', threadId, 'model', model, 'effort', effort ?? 'default');
+        requirements =
+          (await connection.request<ConfigRequirementsResponse>('configRequirements/read', {}))
+            ?.requirements ?? null;
+        main = await startThread(options);
+        mainId = main.id;
+        debug('codex', 'thread', main.id, 'model', main.model, 'effort', main.effort ?? 'default');
       } catch (error) {
         await connection.close();
         throw wrap(error);
@@ -170,114 +248,178 @@ export function createCodexProvider(connect: Connect = connectToAppServer): Mode
       const listModels = async () =>
         (await connection.request<ModelListResponse>('model/list', { limit: 50 })).data ?? [];
 
-      /** What the current model accepts, straight from Codex's model catalog. */
-      const supportedEfforts = async () => {
-        const entry = (await listModels()).find((candidate) =>
-          [candidate.model, candidate.id].includes(model),
-        );
-        return (entry?.supportedReasoningEfforts ?? []).map((option) => option.reasoningEffort);
-      };
+      /**
+       * A ModelSession for one thread. The main thread owns the connection;
+       * an agent's thread only borrows it, so closing it unsubscribes that
+       * thread and leaves the process — and the main thread — running.
+       */
+      const sessionFor = (
+        thread: ProviderSessionOptions,
+        started: StartedThread,
+        role: 'main' | 'agent',
+      ): ModelSession => {
+        const threadId = started.id;
+        const turns = new TurnRouter(thread.cwd);
+        hosts.set(threadId, { options: thread, turns });
+        const context = thread.context;
+        const model = started.model;
+        // Sent with every turn once chosen: Codex takes effort per turn, so a
+        // change never needs a new thread.
+        let effort: string | undefined = thread.effort ?? started.effort;
 
-      return {
-        access: codexAccess(options.permissions),
-        get model() {
-          return model;
-        },
-        get effort() {
-          return effort;
-        },
-        efforts: supportedEfforts,
-        async setEffort(level) {
-          const supported = await supportedEfforts();
-          if (supported.length > 0 && !supported.includes(level)) {
-            throw new PolarisError(
-              `${model} does not support effort "${level}". Use one of: ${supported.join(', ')}.`,
-            );
-          }
-          effort = level;
-        },
-        async *send(input, signal): AsyncIterable<ModelEvent> {
-          signal?.throwIfAborted();
-          const turn = turns.open();
-          let turnId: string;
-          try {
-            // A skill loaded with /skill after the thread started travels with
-            // this message, once: developer instructions are fixed per thread.
-            const pending = context?.pending();
-            const started = await connection.request<TurnStartResponse>('turn/start', {
-              threadId,
-              input: [
-                ...(pending ? [{ type: 'text', text: pending, text_elements: [] }] : []),
-                { type: 'text', text: input, text_elements: [] },
-              ],
-              ...(effort ? { effort } : {}),
-            });
-            turnId = started.turn.id;
-            turns.bind(turn, turnId);
-          } catch (error) {
-            turns.close(turn);
-            throw wrap(error);
-          }
+        /** What the current model accepts, straight from Codex's model catalog. */
+        const supportedEfforts = async () => {
+          const entry = (await listModels()).find((candidate) =>
+            [candidate.model, candidate.id].includes(model),
+          );
+          return (entry?.supportedReasoningEfforts ?? []).map((option) => option.reasoningEffort);
+        };
 
-          // Ctrl+C interrupts this turn only; the thread stays alive and the
-          // next prompt reuses it. Codex owns whatever its transcript keeps of
-          // the interrupted answer — Polaris adds no rules of its own.
-          const onAbort = () => {
-            void connection
-              .request('turn/interrupt', { threadId, turnId })
-              .catch((error: unknown) => debug('codex', 'interrupt failed', String(error)));
-          };
-          signal?.addEventListener('abort', onAbort, { once: true });
+        const session: ModelSession = {
+          access: codexAccess(thread.permissions),
+          get model() {
+            return model;
+          },
+          get effort() {
+            return effort;
+          },
+          efforts: supportedEfforts,
+          async setEffort(level) {
+            const supported = await supportedEfforts();
+            if (supported.length > 0 && !supported.includes(level)) {
+              throw new PolarisError(
+                `${model} does not support effort "${level}". Use one of: ${supported.join(', ')}.`,
+              );
+            }
+            effort = level;
+          },
+          async *send(input, signal): AsyncIterable<ModelEvent> {
+            signal?.throwIfAborted();
+            const turn = turns.open();
+            let turnId: string;
+            try {
+              // A skill loaded with /skill after the thread started travels with
+              // this message, once: developer instructions are fixed per thread.
+              const pending = context?.pending();
+              const response = await connection.request<TurnStartResponse>('turn/start', {
+                threadId,
+                input: [
+                  ...(pending ? [{ type: 'text', text: pending, text_elements: [] }] : []),
+                  { type: 'text', text: input, text_elements: [] },
+                ],
+                ...(effort ? { effort } : {}),
+              });
+              turnId = response.turn.id;
+              turns.bind(turn, turnId);
+            } catch (error) {
+              turns.close(turn);
+              throw wrap(error);
+            }
 
-          try {
-            yield { type: 'message-start' };
-            for await (const event of turn.drain()) {
-              if (event.type === 'delta') {
-                yield { type: 'text-delta', text: event.text };
-                continue;
-              }
-              if (event.type === 'tool') {
-                yield event.event;
-                continue;
+            // Ctrl+C interrupts this thread's turn only; the thread stays alive
+            // and the next prompt reuses it. An agent's interrupt never reaches
+            // the main thread, nor the main's an agent's.
+            const onAbort = () => {
+              void connection
+                .request('turn/interrupt', { threadId, turnId })
+                .catch((error: unknown) => debug('codex', 'interrupt failed', String(error)));
+            };
+            signal?.addEventListener('abort', onAbort, { once: true });
+
+            try {
+              yield { type: 'message-start' };
+              for await (const event of turn.drain()) {
+                if (event.type === 'delta') {
+                  yield { type: 'text-delta', text: event.text };
+                  continue;
+                }
+                if (event.type === 'tool') {
+                  yield event.event;
+                  continue;
+                }
+                if (signal?.aborted) signal.throwIfAborted();
+                if (event.type === 'failed') throw turnFailed(event.detail);
               }
               if (signal?.aborted) signal.throwIfAborted();
-              if (event.type === 'failed') throw turnFailed(event.detail);
+              yield { type: 'message-end' };
+            } catch (error) {
+              if (signal?.aborted) throw error;
+              throw wrap(error);
+            } finally {
+              signal?.removeEventListener('abort', onAbort);
+              turns.close(turn);
             }
-            if (signal?.aborted) signal.throwIfAborted();
-            yield { type: 'message-end' };
-          } catch (error) {
-            if (signal?.aborted) throw error;
-            throw wrap(error);
-          } finally {
-            signal?.removeEventListener('abort', onAbort);
-            turns.close(turn);
-          }
-        },
-        async usage() {
-          // Ask the account for the current windows, but never let a failed
-          // read hide the tokens we already have: a usage view that refuses
-          // to render because one number is missing is worse than a partial one.
-          try {
-            const fresh = await connection.request<RateLimitsResponse>(
-              'account/rateLimits/read',
-              {},
+          },
+          async listModels() {
+            return (await listModels())
+              .filter((entry) => !entry.hidden)
+              .map((entry) => entry.model ?? entry.id);
+          },
+          async close() {
+            turns.abortAll(new Error('session closed'));
+            hosts.delete(threadId);
+            if (role === 'main') {
+              for (const host of hosts.values()) host.turns.abortAll(new Error('session closed'));
+              hosts.clear();
+              await connection.close();
+              return;
+            }
+            await connection
+              .request('thread/unsubscribe', { threadId })
+              .catch((error: unknown) => debug('codex', 'unsubscribe failed', String(error)));
+            debug('codex', 'agent thread', threadId, 'released');
+          },
+        };
+        if (role === 'agent') return session;
+
+        return {
+          ...session,
+          // Spread copies values, not accessors: these stay live.
+          get model() {
+            return session.model;
+          },
+          get effort() {
+            return session.effort;
+          },
+          async usage() {
+            // Ask the account for the current windows, but never let a failed
+            // read hide the tokens we already have: a usage view that refuses
+            // to render because one number is missing is worse than a partial one.
+            try {
+              const fresh = await connection.request<RateLimitsResponse>(
+                'account/rateLimits/read',
+                {},
+              );
+              rateLimits = fresh?.rateLimits ?? rateLimits;
+            } catch (error) {
+              debug('codex', 'rate limits unavailable', String(error));
+            }
+            return buildReport(model, tokens, rateLimits);
+          },
+          /**
+           * An agent's thread on this same App Server: a new, ephemeral thread
+           * with only the context Polaris gives it — no second process to
+           * start, and nothing of this conversation carried over.
+           */
+          async createChild(child) {
+            const started = await startThread(child, {
+              ephemeral: true,
+              model: child.model ?? model,
+            }).catch((error: unknown) => {
+              throw wrap(error);
+            });
+            debug('codex', 'agent thread', started.id, 'on the main connection');
+            const inherited = child.effort ?? effort;
+            return sessionFor(
+              inherited ? { ...child, effort: inherited } : child,
+              started,
+              'agent',
             );
-            rateLimits = fresh?.rateLimits ?? rateLimits;
-          } catch (error) {
-            debug('codex', 'rate limits unavailable', String(error));
-          }
-          return buildReport(model, tokens, rateLimits);
-        },
-        async listModels() {
-          return (await listModels())
-            .filter((entry) => !entry.hidden)
-            .map((entry) => entry.model ?? entry.id);
-        },
-        async close() {
-          turns.abortAll(new Error('session closed'));
-          await connection.close();
-        },
+          },
+        };
       };
+
+      return sessionFor(options, main, 'main');
     },
   };
 }
@@ -394,7 +536,7 @@ class TurnRouter {
       isToolItem(params.item)
     ) {
       const item = params.item;
-      // Skill loads are shown by Polaris under the skill's name, not as tools.
+      // Skill loads and delegations are shown by Polaris, not as tools.
       if (item.type === 'dynamicToolCall' && SKILL_TOOL_NAMES.has(String(item.tool ?? ''))) return;
       if (item.type === 'fileChange') this.#changes.set(item.id as string, fileChanges(item));
       if (method === 'item/fileChange/patchUpdated') return;
@@ -402,7 +544,7 @@ class TurnRouter {
       this.#route(turnId)?.push({ type: 'tool', event });
       return;
     }
-    debug('codex', 'ignoring', method);
+    debug('codex', 'ignoring', method, String((params.item as JsonObject | undefined)?.type ?? ''));
   }
 
   /** Before `turn/start` answers we do not know the id yet, so a lone open turn claims it. */
@@ -456,7 +598,7 @@ class Turn {
   }
 }
 
-const SKILL_TOOL_NAMES = new Set<string>([LOAD_SKILL, READ_SKILL_REFERENCE]);
+const SKILL_TOOL_NAMES = new Set<string>([LOAD_SKILL, READ_SKILL_REFERENCE, DELEGATE_TASK]);
 
 /** `dynamicTools` entries for thread/start. */
 const SKILL_TOOLS = [
@@ -484,12 +626,33 @@ const SKILL_TOOLS = [
   },
 ];
 
-/** `item/tool/call`: the reply carries the skill's text into the thread. */
-async function answerSkillCall(
-  context: NonNullable<ProviderSessionOptions['context']>,
+const DELEGATE_TOOL = {
+  type: 'function',
+  name: DELEGATE_TASK,
+  description: DELEGATE_TASK_DESCRIPTION,
+  inputSchema: DELEGATE_TASK_SCHEMA,
+};
+
+/** What Polaris offers a thread: skill loading, and delegation for the main agent. */
+function polarisTools(context: SessionContext): object[] {
+  return [
+    ...(context.hasSkills ? SKILL_TOOLS : []),
+    ...(context.canDelegate ? [DELEGATE_TOOL] : []),
+  ];
+}
+
+/**
+ * `item/tool/call`: the reply carries a skill's text, or an agent's result,
+ * into the thread. A delegation answers once the agent's run has ended.
+ */
+async function answerToolCall(
+  context: SessionContext,
   params: JsonObject,
 ): Promise<{ ok: boolean; text: string }> {
   const args = (params.arguments ?? {}) as Record<string, unknown>;
+  if (params.tool === DELEGATE_TASK) {
+    return context.delegate(String(args.agent ?? ''), String(args.task ?? ''));
+  }
   if (params.tool === LOAD_SKILL) {
     return context.loadSkill(String(args.name ?? ''), { inline: true });
   }

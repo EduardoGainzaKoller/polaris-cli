@@ -9,6 +9,8 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import {
+  DELEGATE_TASK,
+  DELEGATE_TASK_DESCRIPTION,
   LOAD_SKILL,
   LOAD_SKILL_DESCRIPTION,
   READ_REFERENCE_DESCRIPTION,
@@ -166,18 +168,28 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
               ]
                 .filter(Boolean)
                 .join('\n\n'),
-              ...(context?.hasSkills
-                ? // The permission bridge allows these two itself; `allowedTools`
+              ...(context && (context.hasSkills || context.canDelegate)
+                ? // The permission bridge allows these itself; `allowedTools`
                   // would bypass it and makes the SDK warn on stderr.
-                  { mcpServers: { [SKILL_SERVER]: skillServer(context) } }
+                  { mcpServers: { [SKILL_SERVER]: polarisServer(context) } }
                 : {}),
-              tools: toolsFor(session.permissions),
+              // An agent's session is a query of its own, controlled by
+              // Polaris: the runtime's native subagents stay disabled
+              // (DENIED_TOOLS), so its context, tools and lifetime are
+              // exactly what the agent definition says.
+              tools: toolsFor(session.permissions, session.capabilities),
               canUseTool: permissionBridge(session.cwd, session.gate, decisions),
               hooks: {
                 PreToolUse: [
                   {
                     hooks: [
-                      workspaceGuard(session.cwd, session.permissions, session.gate, decisions),
+                      workspaceGuard(
+                        session.cwd,
+                        session.permissions,
+                        session.gate,
+                        decisions,
+                        session.capabilities,
+                      ),
                     ],
                   },
                 ],
@@ -194,7 +206,7 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
       }
 
       return {
-        access: claudeAccess(session.permissions),
+        access: claudeAccess(session.permissions, session.capabilities),
         get model() {
           return model;
         },
@@ -308,11 +320,12 @@ export function createClaudeProvider(run: QueryFn = query): ModelProvider {
 export const claudeProvider: ModelProvider = createClaudeProvider();
 
 /**
- * Skill loading through the Agent SDK's own custom-tool mechanism: an
- * in-process MCP server. The reply carries the skill's instructions, which is
- * how they enter a conversation whose system prompt is already fixed.
+ * Skill loading and delegation through the Agent SDK's own custom-tool
+ * mechanism: an in-process MCP server. A skill's reply carries its
+ * instructions, which is how they enter a conversation whose system prompt is
+ * already fixed; a delegation's reply carries the agent's result alone.
  */
-function skillServer(context: SessionContext) {
+function polarisServer(context: SessionContext) {
   const reply = ({ ok, text }: { ok: boolean; text: string }) => ({
     content: [{ type: 'text' as const, text }],
     ...(ok ? {} : { isError: true }),
@@ -320,15 +333,29 @@ function skillServer(context: SessionContext) {
   return createSdkMcpServer({
     name: SKILL_SERVER,
     tools: [
-      tool(LOAD_SKILL, LOAD_SKILL_DESCRIPTION, { name: z.string() }, async ({ name }) =>
-        reply(await context.loadSkill(name, { inline: true })),
-      ),
-      tool(
-        READ_SKILL_REFERENCE,
-        READ_REFERENCE_DESCRIPTION,
-        { skill: z.string(), path: z.string() },
-        async ({ skill, path }) => reply(await context.readReference(skill, path)),
-      ),
+      ...(context.hasSkills
+        ? [
+            tool(LOAD_SKILL, LOAD_SKILL_DESCRIPTION, { name: z.string() }, async ({ name }) =>
+              reply(await context.loadSkill(name, { inline: true })),
+            ),
+            tool(
+              READ_SKILL_REFERENCE,
+              READ_REFERENCE_DESCRIPTION,
+              { skill: z.string(), path: z.string() },
+              async ({ skill, path }) => reply(await context.readReference(skill, path)),
+            ),
+          ]
+        : []),
+      ...(context.canDelegate
+        ? [
+            tool(
+              DELEGATE_TASK,
+              DELEGATE_TASK_DESCRIPTION,
+              { agent: z.string(), task: z.string() },
+              async ({ agent, task }) => reply(await context.delegate(agent, task)),
+            ),
+          ]
+        : []),
     ],
   });
 }

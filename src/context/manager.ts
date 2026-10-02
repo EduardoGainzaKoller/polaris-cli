@@ -48,7 +48,7 @@ export interface ContextBudget {
 export class ContextManager {
   readonly #workspace: string;
   #boundary: string | null;
-  readonly #roots: SkillRoots;
+  #roots: SkillRoots;
   #project: ProjectContext = EMPTY_PROJECT;
   #registry = SkillRegistry.empty();
   #loaded: Skill[] = [];
@@ -171,8 +171,26 @@ export class ContextManager {
   }
 
   /** A view for one provider session: see `SessionContext`. */
-  session(): SessionContext {
-    return new SessionContext(this);
+  session(options: SessionContextOptions = {}): SessionContext {
+    return new SessionContext(this, options);
+  }
+
+  /**
+   * A context of its own for one agent run: the same project instructions and
+   * skill catalog as of now, as its policy allows, and nothing loaded. What
+   * the run loads stays in it — the main conversation never sees it — and a
+   * later reload here does not reach a run that has already started.
+   */
+  scoped(policy: { project: boolean; skillCatalog: boolean }): ContextManager {
+    const scoped = new ContextManager({
+      workspace: this.#workspace,
+      boundary: this.#boundary,
+      home: '',
+    });
+    scoped.#roots = this.#roots;
+    scoped.#project = policy.project ? this.#project : EMPTY_PROJECT;
+    scoped.#registry = policy.skillCatalog ? this.#registry : SkillRegistry.empty();
+    return scoped;
   }
 
   #emit(event: ContextEvent): void {
@@ -186,20 +204,55 @@ export class ContextManager {
  * skills this session has already delivered, so a runtime whose instructions
  * are fixed at start can be handed a skill the user loaded later exactly once.
  */
+export interface SessionContextOptions {
+  /** An agent's own instructions, which open its context. Absent for the main agent. */
+  readonly role?: string;
+  /** How this session delegates to agents. Absent for an agent: it cannot delegate. */
+  readonly delegation?: DelegationPort;
+}
+
+/**
+ * How a session hands a task to an agent. The reply is the agent's result,
+ * already rendered for the model; nothing else of the agent's run comes back.
+ */
+export interface DelegationPort {
+  readonly agents: readonly { readonly name: string; readonly description: string }[];
+  delegate(agent: string, task: string): Promise<ContextReply>;
+}
+
 export class SessionContext {
   readonly #manager: ContextManager;
   readonly #delivered = new Set<string>();
   readonly #generation: number;
+  readonly #role: string | undefined;
+  readonly #delegation: DelegationPort | undefined;
 
-  constructor(manager: ContextManager) {
+  constructor(manager: ContextManager, options: SessionContextOptions = {}) {
     this.#manager = manager;
     this.#generation = manager.generation;
+    this.#role = options.role;
+    this.#delegation = options.delegation;
     for (const skill of manager.loaded) this.#delivered.add(skill.metadata.name);
   }
 
   /** True when there are skills a model could load. */
   get hasSkills(): boolean {
     return this.#manager.skills.list().length > 0;
+  }
+
+  /** True when this session may hand tasks to agents: the main agent, never an agent. */
+  get canDelegate(): boolean {
+    return (this.#delegation?.agents.length ?? 0) > 0;
+  }
+
+  /**
+   * The model asks for an agent. This is orchestration, not a workspace tool:
+   * it never reaches the tool registry or the gate — the agent's own session
+   * meets those — and its reply is the agent's result alone.
+   */
+  async delegate(agent: string, task: string): Promise<ContextReply> {
+    if (!this.#delegation) return { ok: false, text: 'Delegation is not available here.' };
+    return this.#delegation.delegate(agent, task);
   }
 
   /**
@@ -210,12 +263,21 @@ export class SessionContext {
    */
   instructions(options: { canLoad: boolean }): string {
     for (const skill of this.#manager.loaded) this.#delivered.add(skill.metadata.name);
-    return renderInstructions(
-      this.#manager.project,
-      this.#manager.skills.list(),
-      this.#manager.loaded,
-      options,
-    );
+    // The agent catalog travels with the same custom-tool mechanism as skills:
+    // a runtime that cannot offer load_skill cannot offer delegate_task either.
+    const agents = options.canLoad && this.#delegation ? renderAgents(this.#delegation.agents) : '';
+    return [
+      this.#role ?? '',
+      renderInstructions(
+        this.#manager.project,
+        this.#manager.skills.list(),
+        this.#manager.loaded,
+        options,
+      ),
+      agents,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
   }
 
   /**
@@ -256,6 +318,29 @@ export class SessionContext {
 /** Tool names the model sees, whichever runtime hosts them. */
 export const LOAD_SKILL = 'load_skill';
 export const READ_SKILL_REFERENCE = 'read_skill_reference';
+
+export const DELEGATE_TASK = 'delegate_task';
+
+export const DELEGATE_TASK_DESCRIPTION =
+  'Hand one focused task to an agent listed in your instructions. It works in its own ' +
+  'isolated context with its own restricted tools and returns only a structured result: ' +
+  'summary, relevant files, findings and open questions. Delegate only when isolated ' +
+  'exploration materially helps; never for a file you could simply read yourself.';
+
+/** JSON Schema of delegate_task's input, for runtimes that take one. */
+export const DELEGATE_TASK_SCHEMA = {
+  type: 'object',
+  properties: {
+    agent: { type: 'string', description: 'The agent name, as listed.' },
+    task: {
+      type: 'string',
+      description:
+        'What the agent should find out, self-contained: it sees nothing of this conversation.',
+    },
+  },
+  required: ['agent', 'task'],
+  additionalProperties: false,
+} as const;
 
 export const LOAD_SKILL_DESCRIPTION =
   'Load one of the skills listed in your instructions: reusable, project-approved guidance ' +
@@ -308,6 +393,24 @@ export function renderInstructions(
   }
   for (const skill of loaded) parts.push(renderSkill(skill));
   return parts.join('\n\n');
+}
+
+/** The agents a main agent can delegate to: names and descriptions, never instructions. */
+export function renderAgents(
+  agents: readonly { readonly name: string; readonly description: string }[],
+): string {
+  if (agents.length === 0) return '';
+  return [
+    '<available_agents>',
+    `You can hand a focused task to one of these agents with ${DELEGATE_TASK}. It starts with a`,
+    'clean context — none of this conversation — so make the task self-contained. You receive',
+    'only its result; continue your own work from it. Delegate only when an isolated exploration',
+    'materially helps, such as understanding how a feature is built across a repository or which',
+    'components a change would touch. Do not delegate trivial reads, a file you already know, or',
+    'anything you can answer directly: delegation costs time. Delegate the same task at most once.',
+    ...agents.map((agent) => `- ${agent.name}: ${agent.description}`),
+    '</available_agents>',
+  ].join('\n');
 }
 
 export function renderSkill(skill: Skill): string {

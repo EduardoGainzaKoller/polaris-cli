@@ -176,7 +176,11 @@ test('the session performs the documented handshake before anything else', async
   // to leave the sandbox, so nothing inside the workspace would ever be asked.
   assert.equal(thread?.params.approvalPolicy, 'untrusted');
   assert.notEqual(thread?.params.sandbox, 'danger-full-access');
-  assert.deepEqual(thread?.params.config, { web_search: 'disabled' }, 'no web access');
+  assert.deepEqual(
+    thread?.params.config,
+    { web_search: 'disabled', 'features.multi_agent': false },
+    'no web access, and no subagents but Polaris’s own',
+  );
   assert.equal(session.model, MODEL, 'the model comes from the runtime, not from Polaris');
   await session.close();
 });

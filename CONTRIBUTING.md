@@ -48,6 +48,7 @@ src/
   tools/              Read/Glob/Grep/Write/Edit/Run and the workspace boundary
   workspace/          read-only Git client, change tracking, checkpoints and undo
   context/            POLARIS.md and skills
+  agents/             agent definitions, the agent manager and delegation results
   cli/                commands, the line renderer, doctor and first-run setup
   ui/                 the Ink terminal UI and pure layout helpers
 ```

@@ -80,6 +80,8 @@ test('the registry resolves names and aliases and lists every command', () => {
     commands.list().map((command) => command.name),
     [
       'activity',
+      'agent',
+      'agents',
       'checkpoint',
       'checkpoints',
       'clear',

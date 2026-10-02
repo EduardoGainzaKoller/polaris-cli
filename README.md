@@ -5,11 +5,11 @@
 ![Status](https://img.shields.io/badge/status-Developer%20Preview-orange)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-384%20passing-2ea44f)
+![Tests](https://img.shields.io/badge/tests-416%20passing-2ea44f)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ```text
- ✦ my-project                                              v0.8.3 · Developer Preview
+ ✦ my-project                                              v0.9.0 · Developer Preview
 
   ┃ Add validation to createUser and add the tests it needs.
 
@@ -49,6 +49,8 @@ Anthropic API key — and adds a common layer around them:
   after a passing test, the result goes back to *unverified*.
 - **Project knowledge** — a `POLARIS.md` file and reusable *skills* teach it your
   project's conventions.
+- **Delegation** — for a broad question, the agent can hand the exploration to a read-only
+  `repository-explorer` that works in its own context and returns only its findings.
 - **Live feedback** — you always see what is running, for how long, and its latest output.
 
 ## Requirements
@@ -159,6 +161,23 @@ profile with `/permissions`, or for one run with `polaris --permissions read-onl
 
 The [full guide](docs/guide.md#project-context-and-skills) has the file format.
 
+## Agents
+
+The main agent can delegate a focused exploration to **`repository-explorer`**: a
+read-only agent that starts with a clean context (your request, the task and
+`POLARIS.md` — not the conversation), searches and reads the repository, and returns a
+structured result: a summary, the relevant files, findings and open questions. Only that
+result goes back to the main agent; you see the explorer's tool calls nested under it.
+
+- It can only read: anything else is denied outright, never put to you as an approval,
+  whatever your profile.
+- One level deep, one at a time, at most three per request; cancelled with Ctrl+C like
+  anything else.
+- `/agents` lists the agents; `/agent repository-explorer <task>` runs it yourself and
+  shows you the result without adding it to the conversation.
+
+The [full guide](docs/guide.md#agents) explains how each provider runs it.
+
 ## Commands
 
 | Command | What it does |
@@ -170,6 +189,7 @@ The [full guide](docs/guide.md#project-context-and-skills) has the file format.
 | `/tools` | What Polaris may do, and when it asks |
 | `/context` | The `POLARIS.md` instructions in use |
 | `/skills` · `/skill <name>` | List or load skills |
+| `/agents` · `/agent <name> <task>` | List agents, or run one yourself |
 | `/diff` | What Polaris changed this session |
 | `/checkpoint` · `/checkpoints` · `/undo` | Save and restore Polaris's changes |
 | `/verify` | Run the project's checks against the current changes |
